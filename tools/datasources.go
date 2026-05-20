@@ -403,12 +403,10 @@ var GetDatasource = mcpgrafana.MustTool(
 type UpdateDatasourceParams struct {
 	UID             string                 `json:"uid" jsonschema:"required,description=UID of the datasource to update"`
 	Name            *string                `json:"name,omitempty" jsonschema:"description=Display name"`
-	Type            *string                `json:"type,omitempty" jsonschema:"description=Plugin type"`
 	URL             *string                `json:"url,omitempty" jsonschema:"description=Base URL"`
 	Access          *string                `json:"access,omitempty" jsonschema:"description=proxy or direct"`
 	Database        *string                `json:"database,omitempty" jsonschema:"description=Database name"`
 	BasicAuth       *bool                  `json:"basicAuth,omitempty" jsonschema:"description=Enable basic auth"`
-	WithCredentials *bool                  `json:"withCredentials,omitempty" jsonschema:"description=Forward cookies/credentials"`
 	IsDefault       *bool                  `json:"isDefault,omitempty" jsonschema:"description=Make this the default datasource"`
 	JSONData        map[string]interface{} `json:"jsonData,omitempty" jsonschema:"description=Non-secret plugin settings; replaces existing jsonData when set"`
 }
@@ -451,9 +449,6 @@ func updateDatasource(ctx context.Context, args UpdateDatasourceParams) (*Update
 	if args.Name != nil {
 		cmd.Name = *args.Name
 	}
-	if args.Type != nil {
-		cmd.Type = *args.Type
-	}
 	if args.URL != nil {
 		cmd.URL = *args.URL
 	}
@@ -465,9 +460,6 @@ func updateDatasource(ctx context.Context, args UpdateDatasourceParams) (*Update
 	}
 	if args.BasicAuth != nil {
 		cmd.BasicAuth = *args.BasicAuth
-	}
-	if args.WithCredentials != nil {
-		cmd.WithCredentials = *args.WithCredentials
 	}
 	if args.IsDefault != nil {
 		cmd.IsDefault = *args.IsDefault
@@ -559,8 +551,8 @@ func checkDatasourceHealth(ctx context.Context, args CheckDatasourceHealthParams
 }
 
 type BulkCheckDatasourceHealthParams struct {
-	Type   string   `json:"type,omitempty" jsonschema:"description=Plugin type to filter; omit to check all"`
-	UIDs   []string `json:"uids,omitempty" jsonschema:"description=UIDs to check; takes priority over type"`
+	Type   string   `json:"type,omitempty" jsonschema:"description=Plugin type filter; omit to check all"`
+	UIDs   []string `json:"uids,omitempty" jsonschema:"description=UIDs to check"`
 	Offset int      `json:"offset,omitempty" jsonschema:"default=0,description=Number to skip for pagination"`
 }
 
