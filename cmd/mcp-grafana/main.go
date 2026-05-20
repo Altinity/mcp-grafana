@@ -19,6 +19,7 @@ import (
 
 	mcpgrafana "github.com/grafana/mcp-grafana"
 	"github.com/grafana/mcp-grafana/observability"
+	mcpgrafanaoauth "github.com/grafana/mcp-grafana/pkg/oauth"
 	"github.com/grafana/mcp-grafana/tools"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/semconv/v1.40.0/mcpconv"
@@ -331,6 +332,136 @@ func (tc *tlsConfig) addFlags() {
 	flag.StringVar(&tc.keyFile, "server.tls-key-file", "", "Path to TLS private key file for server HTTPS (required for TLS)")
 }
 
+// oauthFlags holds the OAuth command-line surface. Secret-bearing fields
+// (client secret, signing secret) are read from files / env only — never
+// accepted on the command line — so they don't leak into `ps eww`, shell
+// history, or container metadata.
+type oauthFlags struct {
+	enabled               bool
+	issuer                string
+	jwksURL               string
+	audience              string
+	clientID              string
+	clientSecretFile      string
+	authURL               string
+	tokenURL              string
+	signingSecretFile     string
+	scopes                string
+	requiredScopes        string
+	allowedEmailDomains   string
+	allowedHostedDomains  string
+	publicResourceURL     string
+	publicAuthServerURL   string
+	upstreamOfflineAccess bool
+}
+
+func (o *oauthFlags) addFlags() {
+	flag.BoolVar(&o.enabled, "oauth-enabled", envBool("MCP_OAUTH_ENABLED", false),
+		"Enable forward-mode OAuth broker (validates inbound bearers, mounts /oauth/* + discovery, forwards JWT to Grafana as X-JWT-Assertion).")
+	flag.StringVar(&o.issuer, "oauth-issuer", os.Getenv("MCP_OAUTH_ISSUER"),
+		"Upstream IdP issuer URL. JWKS, /authorize, /token are discovered from this unless overridden.")
+	flag.StringVar(&o.jwksURL, "oauth-jwks-url", os.Getenv("MCP_OAUTH_JWKS_URL"),
+		"Override for the upstream JWKS URL when discovery from --oauth-issuer is unavailable.")
+	flag.StringVar(&o.audience, "oauth-audience", os.Getenv("MCP_OAUTH_AUDIENCE"),
+		"Expected `aud` claim in inbound bearers (RFC 8707). Set to the canonical external URL of this mcp-grafana deployment.")
+	flag.StringVar(&o.clientID, "oauth-client-id", os.Getenv("MCP_OAUTH_CLIENT_ID"),
+		"OAuth client_id used by the broker against the upstream IdP.")
+	flag.StringVar(&o.clientSecretFile, "oauth-client-secret-file", os.Getenv("MCP_OAUTH_CLIENT_SECRET_FILE"),
+		"Path to a file containing the upstream OAuth client secret. Required when --oauth-enabled.")
+	flag.StringVar(&o.authURL, "oauth-auth-url", os.Getenv("MCP_OAUTH_AUTH_URL"),
+		"Override for the upstream /authorize endpoint.")
+	flag.StringVar(&o.tokenURL, "oauth-token-url", os.Getenv("MCP_OAUTH_TOKEN_URL"),
+		"Override for the upstream /token endpoint.")
+	flag.StringVar(&o.signingSecretFile, "oauth-signing-secret-file", os.Getenv("MCP_OAUTH_SIGNING_SECRET_FILE"),
+		"Path to a file containing the HKDF master secret used to derive JWE keys for stateless auth-code/pending-auth artifacts. Required when --oauth-enabled; >=32 bytes.")
+	flag.StringVar(&o.scopes, "oauth-scopes", envOr("MCP_OAUTH_SCOPES", "openid,email,profile"),
+		"Comma-separated scopes requested from the upstream IdP at /authorize.")
+	flag.StringVar(&o.requiredScopes, "oauth-required-scopes", os.Getenv("MCP_OAUTH_REQUIRED_SCOPES"),
+		"Comma-separated scopes the inbound bearer must carry to pass validation. Empty disables the check.")
+	flag.StringVar(&o.allowedEmailDomains, "oauth-allowed-email-domains", os.Getenv("MCP_OAUTH_ALLOWED_EMAIL_DOMAINS"),
+		"Comma-separated allowlist of email domains. Empty disables the check.")
+	flag.StringVar(&o.allowedHostedDomains, "oauth-allowed-hosted-domains", os.Getenv("MCP_OAUTH_ALLOWED_HOSTED_DOMAINS"),
+		"Comma-separated allowlist of Google-style `hd` workspace domains. Empty disables the check.")
+	flag.StringVar(&o.publicResourceURL, "oauth-public-resource-url", os.Getenv("MCP_OAUTH_PUBLIC_RESOURCE_URL"),
+		"External base URL advertised in /.well-known/oauth-protected-resource. Set when this server runs behind a path-prefixing ingress.")
+	flag.StringVar(&o.publicAuthServerURL, "oauth-public-auth-server-url", os.Getenv("MCP_OAUTH_PUBLIC_AUTH_SERVER_URL"),
+		"External base URL advertised in /.well-known/oauth-authorization-server. Set when this server runs behind a path-prefixing ingress.")
+	flag.BoolVar(&o.upstreamOfflineAccess, "oauth-upstream-offline-access", envBool("MCP_OAUTH_UPSTREAM_OFFLINE_ACCESS", false),
+		"Request offline_access / access_type=offline from the upstream IdP so the broker can refresh near-expired id_tokens at /token.")
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return fallback
+}
+
+// toSettings reads secret files and assembles the adapter Settings.
+// Returns Settings{Enabled:false} when the broker is disabled.
+func (o *oauthFlags) toSettings() (mcpgrafanaoauth.Settings, error) {
+	if !o.enabled {
+		return mcpgrafanaoauth.Settings{}, nil
+	}
+	if o.clientSecretFile == "" {
+		return mcpgrafanaoauth.Settings{}, fmt.Errorf("--oauth-client-secret-file is required when --oauth-enabled")
+	}
+	if o.signingSecretFile == "" {
+		return mcpgrafanaoauth.Settings{}, fmt.Errorf("--oauth-signing-secret-file is required when --oauth-enabled")
+	}
+	secretBytes, err := os.ReadFile(o.clientSecretFile)
+	if err != nil {
+		return mcpgrafanaoauth.Settings{}, fmt.Errorf("read --oauth-client-secret-file: %w", err)
+	}
+	signingBytes, err := os.ReadFile(o.signingSecretFile)
+	if err != nil {
+		return mcpgrafanaoauth.Settings{}, fmt.Errorf("read --oauth-signing-secret-file: %w", err)
+	}
+	return mcpgrafanaoauth.Settings{
+		Enabled:               true,
+		Issuer:                o.issuer,
+		JWKSURL:               o.jwksURL,
+		AuthURL:               o.authURL,
+		TokenURL:              o.tokenURL,
+		Audience:              o.audience,
+		ClientID:              o.clientID,
+		ClientSecret:          strings.TrimSpace(string(secretBytes)),
+		SigningSecret:         []byte(strings.TrimSpace(string(signingBytes))),
+		Scopes:                splitCSV(o.scopes),
+		RequiredScopes:        splitCSV(o.requiredScopes),
+		AllowedEmailDomains:   splitCSV(o.allowedEmailDomains),
+		AllowedHostedDomains:  splitCSV(o.allowedHostedDomains),
+		PublicResourceURL:     o.publicResourceURL,
+		PublicAuthServerURL:   o.publicAuthServerURL,
+		UpstreamOfflineAccess: o.upstreamOfflineAccess,
+	}, nil
+}
+
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // httpServer represents a server with Start and Shutdown methods
 type httpServer interface {
 	Start(addr string) error
@@ -394,7 +525,7 @@ func runMetricsServer(addr string, o *observability.Observability) {
 	}
 }
 
-func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.GrafanaConfig, tls tlsConfig, obs observability.Config, sessionIdleTimeoutMinutes int) error {
+func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt disabledTools, gc mcpgrafana.GrafanaConfig, tls tlsConfig, oauthSettings mcpgrafanaoauth.Settings, obs observability.Config, sessionIdleTimeoutMinutes int) error {
 	stderrHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(stderrHandler))
 
@@ -431,6 +562,18 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 
 	s, tm, sm := newServer(transport, dt, o, sessionIdleTimeoutMinutes)
 	defer sm.Close()
+
+	// Build the OAuth broker once and reuse it across SSE/streamable-http
+	// branches. Returns nil when oauthSettings.Enabled is false, in which
+	// case all OAuth wiring downstream is skipped.
+	broker, err := mcpgrafanaoauth.NewBroker(oauthSettings)
+	if err != nil {
+		return fmt.Errorf("oauth: %w", err)
+	}
+	if broker != nil && transport == "stdio" {
+		slog.Warn("--oauth-enabled has no effect with stdio transport (no HTTP surface); ignoring")
+		broker = nil
+	}
 
 	// Create a context that will be cancelled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -478,8 +621,15 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 
 	case "sse":
 		httpSrv := &http.Server{Addr: addr}
+		sseCtxFunc := mcpgrafana.ComposedSSEContextFunc(gc, clientCache)
+		if broker != nil {
+			base := sseCtxFunc
+			sseCtxFunc = func(ctx context.Context, req *http.Request) context.Context {
+				return mcpgrafanaoauth.PropagateIdentity(base(ctx, req), req)
+			}
+		}
 		srv := server.NewSSEServer(s,
-			server.WithSSEContextFunc(mcpgrafana.ComposedSSEContextFunc(gc, clientCache)),
+			server.WithSSEContextFunc(sseCtxFunc),
 			server.WithStaticBasePath(basePath),
 			server.WithHTTPServer(httpSrv),
 		)
@@ -487,10 +637,12 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 		if basePath == "" {
 			basePath = "/"
 		}
-		mux.Handle(basePath, observability.WrapHandler(
-			mcpgrafana.ValidateGrafanaURLMiddleware(srv),
-			basePath,
-		))
+		var inner http.Handler = mcpgrafana.ValidateGrafanaURLMiddleware(srv)
+		if broker != nil {
+			inner = broker.Middleware(inner)
+			broker.RegisterRoutes(mux)
+		}
+		mux.Handle(basePath, observability.WrapHandler(inner, basePath))
 		mux.HandleFunc("/healthz", handleHealthz)
 		if obs.MetricsEnabled {
 			if obs.MetricsAddress == "" {
@@ -505,8 +657,15 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 		return runHTTPServer(ctx, srv, addr, "SSE")
 	case "streamable-http":
 		httpSrv := &http.Server{Addr: addr}
+		httpCtxFunc := mcpgrafana.ComposedHTTPContextFunc(gc, clientCache)
+		if broker != nil {
+			base := httpCtxFunc
+			httpCtxFunc = func(ctx context.Context, req *http.Request) context.Context {
+				return mcpgrafanaoauth.PropagateIdentity(base(ctx, req), req)
+			}
+		}
 		opts := []server.StreamableHTTPOption{
-			server.WithHTTPContextFunc(mcpgrafana.ComposedHTTPContextFunc(gc, clientCache)),
+			server.WithHTTPContextFunc(httpCtxFunc),
 			server.WithStateLess(dt.proxied), // Stateful when proxied tools enabled (requires sessions)
 			server.WithEndpointPath(endpointPath),
 			server.WithStreamableHTTPServer(httpSrv),
@@ -516,10 +675,12 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 		}
 		srv := server.NewStreamableHTTPServer(s, opts...)
 		mux := http.NewServeMux()
-		mux.Handle(endpointPath, observability.WrapHandler(
-			mcpgrafana.ValidateGrafanaURLMiddleware(srv),
-			endpointPath,
-		))
+		var inner http.Handler = mcpgrafana.ValidateGrafanaURLMiddleware(srv)
+		if broker != nil {
+			inner = broker.Middleware(inner)
+			broker.RegisterRoutes(mux)
+		}
+		mux.Handle(endpointPath, observability.WrapHandler(inner, endpointPath))
 		mux.HandleFunc("/healthz", handleHealthz)
 		if obs.MetricsEnabled {
 			if obs.MetricsAddress == "" {
@@ -558,6 +719,8 @@ func main() {
 	gc.addFlags()
 	var tls tlsConfig
 	tls.addFlags()
+	var oauth oauthFlags
+	oauth.addFlags()
 	var obs observability.Config
 	flag.BoolVar(&obs.MetricsEnabled, "metrics", false, "Enable Prometheus metrics endpoint")
 	flag.StringVar(&obs.MetricsAddress, "metrics-address", "", "Separate address for metrics server (e.g., :9090). If empty, metrics are served on the main server at /metrics")
@@ -608,7 +771,13 @@ func main() {
 		obs.NetworkTransport = mcpconv.NetworkTransportTCP
 	}
 
-	if err := run(transport, *addr, *basePath, *endpointPath, parseLevel(*logLevel), dt, grafanaConfig, tls, obs, *sessionIdleTimeoutMinutes); err != nil {
+	oauthSettings, err := oauth.toSettings()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "oauth: %v\n", err)
+		os.Exit(2)
+	}
+
+	if err := run(transport, *addr, *basePath, *endpointPath, parseLevel(*logLevel), dt, grafanaConfig, tls, oauthSettings, obs, *sessionIdleTimeoutMinutes); err != nil {
 		panic(err)
 	}
 }

@@ -935,6 +935,73 @@ func TestAuthRoundTripper(t *testing.T) {
 	})
 }
 
+func TestJWTAssertionRoundTripper(t *testing.T) {
+	t.Run("sets X-JWT-Assertion when assertion configured", func(t *testing.T) {
+		var capturedReq *http.Request
+		mock := &capturingMockRT{fn: func(req *http.Request) (*http.Response, error) {
+			capturedReq = req
+			return &http.Response{StatusCode: 200}, nil
+		}}
+
+		rt := NewJWTAssertionRoundTripper(mock, "eyJhbGciOiJSUzI1NiJ9.payload.sig")
+		req, _ := http.NewRequest("GET", "http://example.com", nil)
+		_, err := rt.RoundTrip(req)
+		require.NoError(t, err)
+
+		assert.Equal(t, "eyJhbGciOiJSUzI1NiJ9.payload.sig", capturedReq.Header.Get("X-JWT-Assertion"))
+		assert.Empty(t, capturedReq.Header.Get("Authorization"), "should not touch Authorization")
+	})
+
+	t.Run("per-request context overrides configured assertion", func(t *testing.T) {
+		var capturedReq *http.Request
+		mock := &capturingMockRT{fn: func(req *http.Request) (*http.Response, error) {
+			capturedReq = req
+			return &http.Response{StatusCode: 200}, nil
+		}}
+
+		rt := NewJWTAssertionRoundTripper(mock, "boot-time-assertion")
+		ctx := WithGrafanaConfig(context.Background(), GrafanaConfig{JWTAssertion: "per-request-assertion"})
+		req, _ := http.NewRequestWithContext(ctx, "GET", "http://example.com", nil)
+		_, err := rt.RoundTrip(req)
+		require.NoError(t, err)
+
+		assert.Equal(t, "per-request-assertion", capturedReq.Header.Get("X-JWT-Assertion"))
+	})
+
+	t.Run("no header set when assertion empty", func(t *testing.T) {
+		var capturedReq *http.Request
+		mock := &capturingMockRT{fn: func(req *http.Request) (*http.Response, error) {
+			capturedReq = req
+			return &http.Response{StatusCode: 200}, nil
+		}}
+
+		rt := NewJWTAssertionRoundTripper(mock, "")
+		req, _ := http.NewRequest("GET", "http://example.com", nil)
+		_, err := rt.RoundTrip(req)
+		require.NoError(t, err)
+
+		assert.Empty(t, capturedReq.Header.Get("X-JWT-Assertion"))
+	})
+
+	t.Run("does not modify original request", func(t *testing.T) {
+		mock := &capturingMockRT{fn: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200}, nil
+		}}
+
+		rt := NewJWTAssertionRoundTripper(mock, "an-assertion")
+		req, _ := http.NewRequest("GET", "http://example.com", nil)
+		_, err := rt.RoundTrip(req)
+		require.NoError(t, err)
+
+		assert.Empty(t, req.Header.Get("X-JWT-Assertion"))
+	})
+
+	t.Run("nil transport uses default", func(t *testing.T) {
+		rt := NewJWTAssertionRoundTripper(nil, "")
+		assert.NotNil(t, rt.underlying)
+	})
+}
+
 func TestBuildTransport(t *testing.T) {
 	t.Run("default chain sets all headers", func(t *testing.T) {
 		var capturedReq *http.Request
