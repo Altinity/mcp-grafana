@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>grafana-mcp data flow: ClickHouse reads &amp; Grafana writes</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #1a1a1a;
+    --muted: #555;
+    --card: #ffffff;
+    --border: #d8d8d8;
+    --accent: #2563eb;
+    --accent-soft: #eef3ff;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --good: #047857;
+    --good-soft: #d1fae5;
+    --code-bg: #f3f4f6;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 32px 28px 80px;
+  }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 22px; margin: 40px 0 8px; padding-top: 24px; border-top: 1px solid var(--border); }
+  h3 { font-size: 17px; margin: 24px 0 8px; }
+  h4 { font-size: 15px; margin: 18px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+  p { margin: 8px 0 12px; }
+  .subtitle { color: var(--muted); font-size: 15px; margin-bottom: 24px; }
+  code, .mono { font-family: var(--mono); font-size: 13px; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.5; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; }
+  td code, th code { background: transparent; padding: 0; }
+  .diagram { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 12px 0 8px; overflow-x: auto; }
+  .diagram svg { display: block; margin: 0 auto; }
+  .caption { color: var(--muted); font-size: 13px; text-align: center; margin: 0 0 8px; }
+  .callout { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 4px; margin: 12px 0; font-size: 14px; }
+  .callout-warn { background: var(--warn-soft); border-left-color: var(--warn); }
+  .callout-good { background: var(--good-soft); border-left-color: var(--good); }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .pill-user { background: #ede9fe; color: #5b21b6; }
+  .pill-sa { background: #ffedd5; color: #9a3412; }
+  .pill-cookie { background: #fce7f3; color: #9d174d; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; margin: 8px 0 16px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 14px; height: 4px; border-radius: 2px; display: inline-block; }
+  ul { padding-left: 22px; margin: 8px 0 14px; }
+  li { margin: 4px 0; }
+  .toc { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 18px; margin: 0 0 28px; font-size: 14px; }
+  .toc ol { margin: 4px 0; padding-left: 22px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* SVG styles */
+  svg .node-bg { fill: var(--card); stroke: var(--fg); stroke-width: 1.5; }
+  svg .node-bg-mcp { fill: #f0f9ff; stroke: var(--accent); stroke-width: 1.5; }
+  svg .node-bg-broker { fill: #fef9c3; stroke: #a16207; stroke-width: 1.2; stroke-dasharray: 4 3; }
+  svg .node-title { font: 600 14px -apple-system, sans-serif; fill: var(--fg); }
+  svg .node-sub { font: 11px var(--mono); fill: var(--muted); }
+  svg .arrow { fill: none; stroke: var(--fg); stroke-width: 1.6; marker-end: url(#arrow); }
+  svg .arrow-user { stroke: #6d28d9; }
+  svg .arrow-sa { stroke: #c2410c; }
+  svg .arrow-cookie { stroke: #be185d; }
+  svg .label { font: 12px var(--mono); fill: var(--fg); }
+  svg .label-bg { fill: var(--bg); opacity: 0.92; }
+  svg .step { font: 700 12px -apple-system, sans-serif; fill: var(--card); }
+  svg .step-circle { fill: var(--fg); }
+</style>
+</head>
+<body>
+
+<h1>grafana-mcp data flow</h1>
+<p class="subtitle">How ClickHouse queries and dashboard saves cross the MCP boundary, with concrete URIs and auth headers on every hop.</p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#cast">The cast</a></li>
+    <li><a href="#read-browser">Reading from ClickHouse — browser path (Grafana proxy + <code>oauthPassThru</code>)</a></li>
+    <li><a href="#read-mcp">Reading from ClickHouse — MCP path (direct, post PR #2)</a></li>
+    <li><a href="#write">Storing a dashboard to Grafana</a></li>
+    <li><a href="#why-asymmetry">Why the asymmetry: Grafana writes go through, CH reads bypass</a></li>
+    <li><a href="#headers">Auth-header cheat sheet</a></li>
+  </ol>
+</div>
+
+<h2 id="cast">The cast</h2>
+<p>Five actors show up across the diagrams. Worth pinning them down before walking the flows.</p>
+<table>
+  <tr><th>Actor</th><th>Where</th><th>What it does</th></tr>
+  <tr><td><strong>Browser</strong></td><td>End-user device</td><td>Renders Grafana dashboards, holds the <code>grafana_session</code> cookie set at OAuth login.</td></tr>
+  <tr><td><strong>claude.ai</strong></td><td>Anthropic</td><td>Calls MCP tools on behalf of the user; attaches the user's bearer to every request.</td></tr>
+  <tr><td><strong>mcp-grafana</strong></td><td>In-cluster (k8s)</td><td>Hosts the MCP server. With <code>--oauth-enabled</code> it also brokers OAuth: validates inbound bearers against the upstream IdP's JWKS and attaches identity to the request context as <code>GrafanaConfig.JWTAssertion</code>.</td></tr>
+  <tr><td><strong>Grafana</strong></td><td>In-cluster, exposed at <code class="mono">grafana-oauth.demo.altinity.cloud</code></td><td>Datasource registry, RBAC, dashboard store. Authenticates browser users via session cookie; authenticates MCP requests via SA token + <code>[auth.jwt]</code> on <code>X-JWT-Assertion</code>.</td></tr>
+  <tr><td><strong>ClickHouse</strong></td><td>In-cluster at <code class="mono">clickhouse-otel.demo.svc.cluster.local:8123</code></td><td>The actual data store. Validates inbound JWTs via its own <code>token_processor</code> + JWKS, runs queries as the JWT subject.</td></tr>
+</table>
+
+<div class="legend">
+  <span><i style="background:#6d28d9"></i><span class="pill pill-user">user JWT</span> the calling user's identity, validated by the upstream IdP</span>
+  <span><i style="background:#c2410c"></i><span class="pill pill-sa">SA token</span> mcp-grafana's service-account credential at Grafana</span>
+  <span><i style="background:#be185d"></i><span class="pill pill-cookie">cookie</span> Grafana session set at browser OAuth login</span>
+</div>
+
+<h2 id="read-browser">Reading from ClickHouse — browser path</h2>
+<p>This is what happens when you open the <em>Claude API — Token Usage</em> dashboard in a tab. It's the path that <em>works</em> today, and it's why the issue was easy to miss until the MCP path got tested.</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 320" width="1000" height="320" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+    </marker>
+  </defs>
+
+  <!-- Browser -->
+  <rect class="node-bg" x="40" y="120" width="180" height="80" rx="8"/>
+  <text class="node-title" x="130" y="155" text-anchor="middle">Browser</text>
+  <text class="node-sub" x="130" y="175" text-anchor="middle">claude API — Token Usage</text>
+
+  <!-- Grafana -->
+  <rect class="node-bg" x="410" y="100" width="220" height="120" rx="8"/>
+  <text class="node-title" x="520" y="135" text-anchor="middle">Grafana</text>
+  <text class="node-sub" x="520" y="155" text-anchor="middle">grafana-oauth.demo.…</text>
+  <text class="node-sub" x="520" y="175" text-anchor="middle">resolves user from cookie,</text>
+  <text class="node-sub" x="520" y="190" text-anchor="middle">forwards stored OAuth token</text>
+  <text class="node-sub" x="520" y="205" text-anchor="middle">because oauthPassThru=true</text>
+
+  <!-- ClickHouse -->
+  <rect class="node-bg" x="800" y="120" width="180" height="80" rx="8"/>
+  <text class="node-title" x="890" y="155" text-anchor="middle">ClickHouse</text>
+  <text class="node-sub" x="890" y="175" text-anchor="middle">clickhouse-otel.demo</text>
+  <text class="node-sub" x="890" y="190" text-anchor="middle">.svc.cluster.local:8123</text>
+
+  <!-- 1. Browser → Grafana -->
+  <path class="arrow arrow-cookie" d="M 220 150 L 405 150"/>
+  <circle class="step-circle" cx="312" cy="120" r="11"/>
+  <text class="step" x="312" y="124" text-anchor="middle">1</text>
+  <rect class="label-bg" x="225" y="158" width="180" height="36" rx="3"/>
+  <text class="label" x="231" y="173">GET /api/datasources/</text>
+  <text class="label" x="231" y="189">proxy/uid/otel/?query=…</text>
+
+  <!-- 3. Grafana → ClickHouse -->
+  <path class="arrow arrow-user" d="M 632 170 L 795 170"/>
+  <circle class="step-circle" cx="713" cy="140" r="11"/>
+  <text class="step" x="713" y="144" text-anchor="middle">3</text>
+  <rect class="label-bg" x="635" y="178" width="160" height="36" rx="3"/>
+  <text class="label" x="641" y="193">GET / ?query=…</text>
+  <text class="label" x="641" y="209">&amp;database=claude_otel</text>
+
+  <!-- Auth labels above arrows -->
+  <text class="label" x="312" y="142" text-anchor="middle" fill="#be185d">Cookie: grafana_session=…</text>
+  <text class="label" x="713" y="162" text-anchor="middle" fill="#6d28d9">Authorization: Bearer ⟨user_jwt⟩</text>
+
+  <!-- Step 2 caption inside Grafana box already; arrow back implied -->
+
+  <!-- Response arrows (dashed, return) -->
+  <path d="M 405 195 L 220 195" stroke="#888" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#arrow)"/>
+  <text class="label" x="312" y="212" text-anchor="middle" fill="#666">JSON response</text>
+
+  <path d="M 795 200 L 632 200" stroke="#888" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#arrow)"/>
+  <text class="label" x="713" y="232" text-anchor="middle" fill="#666">FORMAT JSON envelope</text>
+</svg>
+</div>
+<p class="caption">Figure 1 — Dashboard rendering. Grafana mints a session from the cookie, looks up the upstream OAuth token attached to that session, forwards it as <code>Authorization</code> on the proxied request.</p>
+
+<h4>The URIs</h4>
+<table>
+  <tr><th>#</th><th>Method</th><th>URI</th><th>Auth</th></tr>
+  <tr><td>1</td><td>GET</td><td><code>https://grafana-oauth.demo.altinity.cloud/api/datasources/proxy/uid/otel/?query=…+FORMAT+JSON&amp;database=claude_otel</code></td><td><span class="pill pill-cookie">cookie</span> <code>grafana_session=…</code></td></tr>
+  <tr><td>2</td><td colspan="3"><em>(in-process)</em> Grafana's datasource-proxy handler resolves the user from the cookie, fetches the upstream OAuth token from session storage, and prepares the outbound CH request.</td></tr>
+  <tr><td>3</td><td>GET</td><td><code>http://clickhouse-otel.demo.svc.cluster.local:8123/?query=…+FORMAT+JSON&amp;database=claude_otel</code></td><td><span class="pill pill-user">user JWT</span> <code>Authorization: Bearer ⟨jwt⟩</code></td></tr>
+</table>
+
+<div class="callout callout-good">
+  <strong>Why it works:</strong> the cookie path establishes a real Grafana OAuth session at login. Step 2 has a token to forward. <code>oauthPassThru=true</code> on the datasource tells Grafana <em>do</em> forward it.
+</div>
+
+<h2 id="read-mcp">Reading from ClickHouse — MCP path</h2>
+<p>This is the path that PR #2 fixes. Two key differences from the browser path: there's an extra hop (mcp-grafana sits between claude.ai and Grafana), and the user identity arrives as <code>X-JWT-Assertion</code> instead of a cookie — which turns out to be the decisive difference.</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 460" width="1000" height="460" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+    </marker>
+  </defs>
+
+  <!-- claude.ai -->
+  <rect class="node-bg" x="30" y="40" width="160" height="80" rx="8"/>
+  <text class="node-title" x="110" y="75" text-anchor="middle">claude.ai</text>
+  <text class="node-sub" x="110" y="95" text-anchor="middle">tools/call query_clickhouse</text>
+
+  <!-- mcp-grafana -->
+  <rect class="node-bg-mcp" x="280" y="20" width="280" height="160" rx="10"/>
+  <text class="node-title" x="420" y="48" text-anchor="middle">mcp-grafana</text>
+  <text class="node-sub" x="420" y="65" text-anchor="middle">(in-cluster)</text>
+  <!-- broker inset -->
+  <rect class="node-bg-broker" x="306" y="80" width="228" height="84" rx="6"/>
+  <text class="node-title" x="420" y="100" text-anchor="middle" style="font-size:13px">OAuth broker</text>
+  <text class="node-sub" x="420" y="118" text-anchor="middle">validates inbound bearer</text>
+  <text class="node-sub" x="420" y="132" text-anchor="middle">against upstream IdP JWKS</text>
+  <text class="node-sub" x="420" y="148" text-anchor="middle">→ ctx.JWTAssertion = ⟨jwt⟩</text>
+
+  <!-- Grafana -->
+  <rect class="node-bg" x="650" y="20" width="320" height="120" rx="8"/>
+  <text class="node-title" x="810" y="50" text-anchor="middle">Grafana — discovery only</text>
+  <text class="node-sub" x="810" y="70" text-anchor="middle">[auth.jwt] resolves user from</text>
+  <text class="node-sub" x="810" y="85" text-anchor="middle">X-JWT-Assertion; RBAC check;</text>
+  <text class="node-sub" x="810" y="100" text-anchor="middle">returns ds.URL, jsonData.</text>
+  <text class="node-sub" x="810" y="115" text-anchor="middle">defaultDatabase, tlsSkipVerify</text>
+
+  <!-- ClickHouse -->
+  <rect class="node-bg" x="700" y="320" width="240" height="100" rx="8"/>
+  <text class="node-title" x="820" y="355" text-anchor="middle">ClickHouse</text>
+  <text class="node-sub" x="820" y="375" text-anchor="middle">clickhouse-otel.demo</text>
+  <text class="node-sub" x="820" y="390" text-anchor="middle">.svc.cluster.local:8123</text>
+  <text class="node-sub" x="820" y="406" text-anchor="middle">JWKS validates ⟨jwt⟩</text>
+
+  <!-- 1: claude.ai → mcp-grafana -->
+  <path class="arrow arrow-user" d="M 190 80 L 275 80"/>
+  <circle class="step-circle" cx="232" cy="50" r="11"/>
+  <text class="step" x="232" y="54" text-anchor="middle">1</text>
+  <text class="label" x="232" y="74" text-anchor="middle" fill="#6d28d9">Authorization: Bearer ⟨user_jwt⟩</text>
+  <rect class="label-bg" x="195" y="90" width="80" height="18" rx="3"/>
+  <text class="label" x="200" y="103">POST /mcp</text>
+
+  <!-- 2: mcp-grafana → Grafana (with SA + X-JWT) -->
+  <path class="arrow arrow-sa" d="M 560 80 L 645 80"/>
+  <circle class="step-circle" cx="600" cy="40" r="11"/>
+  <text class="step" x="600" y="44" text-anchor="middle">2</text>
+  <text class="label" x="603" y="64" text-anchor="middle" fill="#c2410c">Authorization: Bearer ⟨SA⟩</text>
+  <text class="label" x="603" y="105" text-anchor="middle" fill="#6d28d9">X-JWT-Assertion: ⟨user_jwt⟩</text>
+  <rect class="label-bg" x="540" y="115" width="200" height="34" rx="3"/>
+  <text class="label" x="546" y="129">GET /api/datasources/</text>
+  <text class="label" x="546" y="145">uid/otel</text>
+
+  <!-- 3: Grafana → mcp-grafana (dashed response: ds.URL) -->
+  <path d="M 645 130 L 560 130" stroke="#888" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#arrow2)"/>
+  <text class="label" x="603" y="162" text-anchor="middle" fill="#666">200 OK — {url: "…ch…:8123", …}</text>
+
+  <!-- 4: mcp-grafana → ClickHouse (direct) -->
+  <path class="arrow arrow-user" d="M 420 184 C 420 260, 700 260, 760 320"/>
+  <circle class="step-circle" cx="560" cy="248" r="11"/>
+  <text class="step" x="560" y="252" text-anchor="middle">4</text>
+  <text class="label" x="600" y="225" text-anchor="middle" fill="#6d28d9">Authorization: Bearer ⟨user_jwt⟩</text>
+  <rect class="label-bg" x="500" y="278" width="230" height="34" rx="3"/>
+  <text class="label" x="508" y="292">GET http://…ch…:8123/?query=…</text>
+  <text class="label" x="508" y="308">FORMAT+JSON&amp;database=claude_otel</text>
+
+  <!-- 5: CH → mcp-grafana (dashed response) -->
+  <path d="M 700 380 C 600 380, 460 280, 420 184" stroke="#888" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#arrow2)"/>
+  <text class="label" x="540" y="395" text-anchor="middle" fill="#666">FORMAT JSON envelope</text>
+</svg>
+</div>
+<p class="caption">Figure 2 — MCP query flow. Discovery still goes through Grafana (for the datasource model + RBAC gate); the query itself talks to ClickHouse directly with the user's own JWT.</p>
+
+<h4>The URIs</h4>
+<table>
+  <tr><th>#</th><th>Method</th><th>URI</th><th>Auth</th></tr>
+  <tr><td>1</td><td>POST</td><td><code>https://mcp-grafana.demo.altinity.cloud/mcp</code> (MCP <code>tools/call query_clickhouse</code>)</td><td><span class="pill pill-user">user JWT</span> <code>Authorization: Bearer ⟨jwt⟩</code></td></tr>
+  <tr><td>—</td><td colspan="3">Broker validates the bearer against the upstream IdP's JWKS, applies <code>--oauth-required-scopes</code> / <code>--oauth-allowed-email-domains</code>, and stores the raw JWT on <code>ctx.GrafanaConfig.JWTAssertion</code>.</td></tr>
+  <tr><td>2</td><td>GET</td><td><code>https://grafana-oauth.demo.altinity.cloud/api/datasources/uid/otel</code> — discovery + RBAC gate</td><td><span class="pill pill-sa">SA</span> <code>Authorization: Bearer ⟨SA_token⟩</code> &amp; <span class="pill pill-user">user JWT</span> <code>X-JWT-Assertion: ⟨jwt⟩</code></td></tr>
+  <tr><td>3</td><td colspan="3">Grafana <code>[auth.jwt]</code> resolves the user from <code>X-JWT-Assertion</code>, checks <code>datasources:read</code> permission, returns the datasource model with <code>url</code>, <code>jsonData.defaultDatabase</code>, etc.</td></tr>
+  <tr><td>4</td><td>GET</td><td><code>http://clickhouse-otel.demo.svc.cluster.local:8123/?query=…+FORMAT+JSON&amp;database=claude_otel</code></td><td><span class="pill pill-user">user JWT</span> <code>Authorization: Bearer ⟨jwt⟩</code></td></tr>
+  <tr><td>5</td><td colspan="3">ClickHouse's <code>token_processor</code> validates the JWT against the configured JWKS, maps it to a CH user (typically by the <code>email</code> claim), runs the query as that user.</td></tr>
+</table>
+
+<div class="callout callout-warn">
+  <strong>Why we don't route step 4 through Grafana's proxy:</strong> Grafana's <code>oauthPassThru</code> only forwards a token when the user has a Grafana-managed OAuth session. The browser path establishes one at OAuth login (stored against the <code>grafana_session</code> cookie). The MCP path arrives via <code>X-JWT-Assertion</code> → <code>[auth.jwt]</code>, which resolves the user but does <em>not</em> mint a session. So <code>oauthPassThru</code> has nothing to forward, and proxied CH queries fall back to whatever credentials the datasource has configured (or fail). Same identity material, different last-hop arrangement — and Grafana's auth subsystems don't compose across that boundary.
+</div>
+
+<div class="callout callout-good">
+  <strong>Net authentication posture vs the dashboard path:</strong> identical. ClickHouse runs the same JWKS validation in both cases; only the courier changes. We trade one cleanly-typed Grafana hop for direct CH access, gaining latency and reliability without weakening identity.
+</div>
+
+<h3>Why we still call Grafana at all</h3>
+<p>Step 2 isn't load-bearing for auth — ClickHouse will validate the JWT regardless. It serves three other purposes:</p>
+<ul>
+  <li><strong>Configuration registry.</strong> The CH URL, the default database, TLS settings — they all live on the Grafana datasource model. Reading <code>ds.URL</code> means the adapter stays portable: anyone configuring a vertamedia datasource in Grafana already supplies it.</li>
+  <li><strong>RBAC gate.</strong> The calling user must be permitted to see the datasource via Grafana's permission model. Drop this check and any holder of a valid JWT can query any CH that mcp-grafana knows about.</li>
+  <li><strong>Discovery uniformity.</strong> Same <code>getDatasourceByUID</code> call as every other datasource-bound tool in mcp-grafana. The dispatch in <code>newClickHouseClient</code> is the only place that branches on plugin type.</li>
+</ul>
+
+<h2 id="write">Storing a dashboard to Grafana</h2>
+<p>Writes are simpler — only one path on the wire — but the auth layering is worth pinning down because it differs from the CH read path.</p>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 340" width="1000" height="340" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+    </marker>
+  </defs>
+
+  <!-- Browser save path -->
+  <text x="60" y="40" font-family="-apple-system, sans-serif" font-weight="600" font-size="13" fill="#555">A. Browser save</text>
+
+  <rect class="node-bg" x="40" y="60" width="160" height="80" rx="8"/>
+  <text class="node-title" x="120" y="95" text-anchor="middle">Browser</text>
+  <text class="node-sub" x="120" y="115" text-anchor="middle">"Save dashboard" click</text>
+
+  <rect class="node-bg" x="430" y="50" width="240" height="100" rx="8"/>
+  <text class="node-title" x="550" y="80" text-anchor="middle">Grafana</text>
+  <text class="node-sub" x="550" y="100" text-anchor="middle">resolves user from cookie,</text>
+  <text class="node-sub" x="550" y="115" text-anchor="middle">checks dashboards:write,</text>
+  <text class="node-sub" x="550" y="130" text-anchor="middle">persists with that user as editor</text>
+
+  <path class="arrow arrow-cookie" d="M 200 95 L 425 95"/>
+  <text class="label" x="312" y="84" text-anchor="middle" fill="#be185d">Cookie: grafana_session=…</text>
+  <rect class="label-bg" x="220" y="100" width="190" height="34" rx="3"/>
+  <text class="label" x="226" y="115">POST /api/dashboards/db</text>
+  <text class="label" x="226" y="130">{ dashboard: {…}, message: "…" }</text>
+
+  <!-- MCP save path -->
+  <text x="60" y="200" font-family="-apple-system, sans-serif" font-weight="600" font-size="13" fill="#555">B. MCP update_dashboard tool</text>
+
+  <rect class="node-bg" x="40" y="220" width="140" height="80" rx="8"/>
+  <text class="node-title" x="110" y="255" text-anchor="middle">claude.ai</text>
+
+  <rect class="node-bg-mcp" x="230" y="220" width="180" height="80" rx="8"/>
+  <text class="node-title" x="320" y="255" text-anchor="middle">mcp-grafana</text>
+  <text class="node-sub" x="320" y="275" text-anchor="middle">JWTAssertion → ctx</text>
+
+  <rect class="node-bg" x="460" y="220" width="240" height="100" rx="8"/>
+  <text class="node-title" x="580" y="250" text-anchor="middle">Grafana</text>
+  <text class="node-sub" x="580" y="270" text-anchor="middle">[auth.jwt] resolves user,</text>
+  <text class="node-sub" x="580" y="285" text-anchor="middle">checks dashboards:write,</text>
+  <text class="node-sub" x="580" y="300" text-anchor="middle">persists with that user as editor</text>
+
+  <path class="arrow arrow-user" d="M 180 260 L 225 260"/>
+  <text class="label" x="200" y="250" text-anchor="middle" fill="#6d28d9" font-size="10">user JWT</text>
+
+  <path class="arrow arrow-sa" d="M 410 250 L 455 250"/>
+  <text class="label" x="430" y="230" text-anchor="middle" fill="#c2410c">SA</text>
+  <text class="label" x="430" y="270" text-anchor="middle" fill="#6d28d9">+ X-JWT-Assertion</text>
+
+  <rect class="label-bg" x="430" y="305" width="220" height="18" rx="3"/>
+  <text class="label" x="436" y="318">POST /api/dashboards/db</text>
+</svg>
+</div>
+<p class="caption">Figure 3 — Dashboard save. The browser uses its session cookie; the MCP path adds <code>X-JWT-Assertion</code> next to the SA token so Grafana can attribute the change to the calling user.</p>
+
+<h4>The URIs (both paths)</h4>
+<table>
+  <tr><th>Path</th><th>Method</th><th>URI</th><th>Auth</th></tr>
+  <tr><td>Browser save</td><td>POST</td><td><code>https://grafana-oauth.demo.altinity.cloud/api/dashboards/db</code></td><td><span class="pill pill-cookie">cookie</span> <code>grafana_session=…</code></td></tr>
+  <tr><td>MCP <code>update_dashboard</code></td><td>POST</td><td><code>https://grafana-oauth.demo.altinity.cloud/api/dashboards/db</code></td><td><span class="pill pill-sa">SA</span> <code>Authorization: Bearer ⟨SA_token⟩</code> &amp; <span class="pill pill-user">user JWT</span> <code>X-JWT-Assertion: ⟨jwt⟩</code></td></tr>
+</table>
+
+<h4>Request body shape</h4>
+<pre>POST /api/dashboards/db HTTP/1.1
+Content-Type: application/json
+
+{
+  "dashboard": {
+    "uid": "token-usage",
+    "title": "Claude API — Token Usage",
+    "panels": [ … ],
+    "version": 7
+  },
+  "message": "Updated panel queries via MCP",
+  "overwrite": false,
+  "folderUid": "default"
+}</pre>
+
+<h2 id="why-asymmetry">Why the asymmetry: Grafana writes go through, ClickHouse reads bypass</h2>
+<p>It's worth being explicit about why we kept Grafana on the path for dashboard writes but dropped it for CH queries — they look superficially similar but they're not.</p>
+<table>
+  <tr><th></th><th>Dashboard write</th><th>ClickHouse read</th></tr>
+  <tr><th>System of record</th><td>Grafana</td><td>ClickHouse</td></tr>
+  <tr><th>RBAC owner</th><td>Grafana — <code>dashboards:write</code></td><td>ClickHouse — JWT subject mapping + CH grants</td></tr>
+  <tr><th>Identity carrier</th><td><code>X-JWT-Assertion</code> resolved by Grafana <code>[auth.jwt]</code></td><td><code>Authorization: Bearer</code> validated by CH JWKS</td></tr>
+  <tr><th>Does Grafana need to forward identity onward?</th><td>No — Grafana is the destination</td><td>Yes — but it can't (no OAuth session under <code>auth.jwt</code>)</td></tr>
+</table>
+<p>For dashboard writes, Grafana itself is the system that needs to know the user — so the <code>X-JWT-Assertion</code> mechanism is sufficient and the request stops there. For CH reads, Grafana would have been an intermediary that has to forward identity to <em>another</em> system, and the only Grafana feature that does that (<code>oauthPassThru</code>) doesn't compose with the <code>auth.jwt</code> identity source. So we route around it.</p>
+
+<h2 id="headers">Auth-header cheat sheet</h2>
+<table>
+  <tr><th>Hop</th><th>Authorization</th><th>X-JWT-Assertion</th><th>Cookie</th></tr>
+  <tr><td>Browser → Grafana</td><td>—</td><td>—</td><td><code>grafana_session=…</code></td></tr>
+  <tr><td>Grafana (proxy) → CH</td><td><code>Bearer ⟨user_oauth_jwt⟩</code> <em>when <code>oauthPassThru=true</code></em></td><td>—</td><td>—</td></tr>
+  <tr><td>claude.ai → mcp-grafana</td><td><code>Bearer ⟨user_jwt⟩</code></td><td>—</td><td>—</td></tr>
+  <tr><td>mcp-grafana → Grafana</td><td><code>Bearer ⟨SA_token⟩</code></td><td><code>⟨user_jwt⟩</code></td><td>—</td></tr>
+  <tr><td>mcp-grafana → CH (PR #2)</td><td><code>Bearer ⟨user_jwt⟩</code></td><td>—</td><td>—</td></tr>
+</table>
+
+<p style="margin-top: 40px; color: var(--muted); font-size: 13px; text-align: center;">
+  Generated for the <code>feature/vertamedia</code> branch (Altinity/mcp-grafana #2), 2026-05-20.
+</p>
+
+</body>
+</html>
