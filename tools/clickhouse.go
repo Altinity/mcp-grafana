@@ -24,8 +24,13 @@ const (
 	// MaxClickHouseLimit is the maximum number of rows that can be requested
 	MaxClickHouseLimit = 1000
 
-	// ClickHouseDatasourceType is the type identifier for ClickHouse datasources
+	// ClickHouseDatasourceType is the type identifier for the official Grafana ClickHouse datasource plugin.
 	ClickHouseDatasourceType = "grafana-clickhouse-datasource"
+
+	// VertamediaClickHouseDatasourceType is the type identifier for Altinity/clickhouse-grafana
+	// (the only ClickHouse plugin that propagates per-user OAuth identity to ClickHouse today,
+	// via Grafana core's oauthPassThru on access=proxy datasources).
+	VertamediaClickHouseDatasourceType = "vertamedia-clickhouse-datasource"
 
 	// ClickHouseFormatTable is the format value for table/tabular query results
 	ClickHouseFormatTable = 1
@@ -62,46 +67,72 @@ type ClickHouseQueryResult struct {
 	Hints          *EmptyResultHints        `json:"hints,omitempty"`
 }
 
-// clickHouseQueryResponse represents the raw API response from Grafana's /api/ds/query
-type clickHouseQueryResponse struct {
-	Results map[string]struct {
-		Status int `json:"status,omitempty"`
-		Frames []struct {
-			Schema struct {
-				Name   string `json:"name,omitempty"`
-				RefID  string `json:"refId,omitempty"`
-				Fields []struct {
-					Name     string `json:"name"`
-					Type     string `json:"type"`
-					TypeInfo struct {
-						Frame string `json:"frame,omitempty"`
-					} `json:"typeInfo,omitempty"`
-				} `json:"fields"`
-			} `json:"schema"`
-			Data struct {
-				Values [][]interface{} `json:"values"`
-			} `json:"data"`
-		} `json:"frames,omitempty"`
-		Error string `json:"error,omitempty"`
-	} `json:"results"`
+// clickHouseFieldTypeInfo describes the source frame for a field in a Grafana dataframe.
+type clickHouseFieldTypeInfo struct {
+	Frame string `json:"frame,omitempty"`
 }
 
-// clickHouseClient handles communication with Grafana's ClickHouse datasource
-type clickHouseClient struct {
+// clickHouseField is one column in a Grafana dataframe.
+type clickHouseField struct {
+	Name     string                  `json:"name"`
+	Type     string                  `json:"type"`
+	TypeInfo clickHouseFieldTypeInfo `json:"typeInfo,omitempty"`
+}
+
+// clickHouseFrameSchema is the schema portion of a Grafana dataframe.
+type clickHouseFrameSchema struct {
+	Name   string            `json:"name,omitempty"`
+	RefID  string            `json:"refId,omitempty"`
+	Fields []clickHouseField `json:"fields"`
+}
+
+// clickHouseFrameData is the columnar data portion of a Grafana dataframe.
+type clickHouseFrameData struct {
+	Values [][]interface{} `json:"values"`
+}
+
+// clickHouseFrame is one Grafana dataframe in a query response.
+type clickHouseFrame struct {
+	Schema clickHouseFrameSchema `json:"schema"`
+	Data   clickHouseFrameData   `json:"data"`
+}
+
+// clickHouseQueryResult is one refId's result inside a Grafana /api/ds/query response.
+type clickHouseQueryResultEntry struct {
+	Status int               `json:"status,omitempty"`
+	Frames []clickHouseFrame `json:"frames,omitempty"`
+	Error  string            `json:"error,omitempty"`
+}
+
+// clickHouseQueryResponse represents the raw API response from Grafana's /api/ds/query.
+// The vertamedia adapter synthesises this same shape from ClickHouse's native FORMAT JSON
+// envelope so the downstream row-extraction loop is shared across plugin types.
+type clickHouseQueryResponse struct {
+	Results map[string]clickHouseQueryResultEntry `json:"results"`
+}
+
+// clickHouseClient abstracts query execution across the supported ClickHouse plugin types
+// (official grafana-clickhouse-datasource and Altinity vertamedia-clickhouse-datasource).
+// Both implementations return Grafana-dataframe-shaped responses so downstream row shaping
+// in queryClickHouse stays unchanged.
+type clickHouseClient interface {
+	query(ctx context.Context, datasourceUID, rawSQL string, from, to time.Time) (*clickHouseQueryResponse, error)
+}
+
+// officialClickHouseClient talks to the official grafana-clickhouse-datasource plugin
+// via Grafana's /api/ds/query endpoint.
+type officialClickHouseClient struct {
 	httpClient *http.Client
 	baseURL    string
 }
 
-// newClickHouseClient creates a new ClickHouse client for the given datasource
-func newClickHouseClient(ctx context.Context, uid string) (*clickHouseClient, error) {
-	// Verify the datasource exists and is a ClickHouse datasource
+// newClickHouseClient builds a client for the given datasource UID. It dispatches by
+// datasource type so callers (the three CH tools) don't need to know which plugin handles
+// the underlying ClickHouse instance.
+func newClickHouseClient(ctx context.Context, uid string) (clickHouseClient, error) {
 	ds, err := getDatasourceByUID(ctx, GetDatasourceByUIDParams{UID: uid})
 	if err != nil {
 		return nil, err
-	}
-
-	if ds.Type != ClickHouseDatasourceType {
-		return nil, fmt.Errorf("datasource %s is of type %s, not %s", uid, ds.Type, ClickHouseDatasourceType)
 	}
 
 	cfg := mcpgrafana.GrafanaConfigFromContext(ctx)
@@ -111,19 +142,24 @@ func newClickHouseClient(ctx context.Context, uid string) (*clickHouseClient, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
+	httpClient := &http.Client{Transport: transport}
 
-	client := &http.Client{
-		Transport: transport,
+	switch ds.Type {
+	case ClickHouseDatasourceType:
+		return &officialClickHouseClient{httpClient: httpClient, baseURL: baseURL}, nil
+	case VertamediaClickHouseDatasourceType:
+		if ds.URL == "" {
+			return nil, fmt.Errorf("vertamedia datasource %s has no url configured; cannot reach ClickHouse directly", uid)
+		}
+		defaultDB, tlsSkipVerify, bearer := vertamediaDatasourceConfig(ctx, ds.URL, ds.JSONData)
+		return newVertamediaClickHouseClient(ds.URL, bearer, defaultDB, tlsSkipVerify), nil
+	default:
+		return nil, fmt.Errorf("datasource %s is of type %s, not %s or %s", uid, ds.Type, ClickHouseDatasourceType, VertamediaClickHouseDatasourceType)
 	}
-
-	return &clickHouseClient{
-		httpClient: client,
-		baseURL:    baseURL,
-	}, nil
 }
 
 // query executes a ClickHouse query via Grafana's /api/ds/query endpoint
-func (c *clickHouseClient) query(ctx context.Context, datasourceUID, rawSQL string, from, to time.Time) (*clickHouseQueryResponse, error) {
+func (c *officialClickHouseClient) query(ctx context.Context, datasourceUID, rawSQL string, from, to time.Time) (*clickHouseQueryResponse, error) {
 	// Build the query payload
 	payload := map[string]interface{}{
 		"queries": []map[string]interface{}{
