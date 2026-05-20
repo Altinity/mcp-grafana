@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ClickHouse tools (`query_clickhouse`, `list_clickhouse_tables`, `describe_clickhouse_table`) now also work with `vertamedia-clickhouse-datasource` ([Altinity/clickhouse-grafana](https://github.com/Altinity/clickhouse-grafana)), routed through Grafana's generic datasource proxy. Per-user OAuth identity reaches ClickHouse via Grafana's `oauthPassThru` (the official `grafana-clickhouse-datasource` plugin's OAuth pass-through is a silent no-op through v4.17.0, so vertamedia is the only path for per-user CH identity today).
 - Snowflake tools (`query_snowflake`, `list_snowflake_tables`, `describe_snowflake_table`) for querying Snowflake datasources (Grafana Enterprise plugin `grafana-snowflake-datasource`) through Grafana's `/api/ds/query` endpoint. Supports `$__timeFilter`, `$__timeFrom`/`$__timeTo`, `$__from`/`$__to`, `$__interval`/`$__interval_ms`, and `${varname}` substitution. Disabled by default — opt in with `--enabled-tools=...,snowflake`.
 
 ## [0.14.0] - 2026-05-08

@@ -100,6 +100,15 @@ The dashboard tools now include several strategies to manage context window usag
 - **Describe table schema:** Get column names, types, and metadata for a ClickHouse table.
 - **Query ClickHouse:** Execute SQL queries with Grafana macro and variable substitution support.
 
+**Supported ClickHouse datasource plugins**
+
+| Plugin type | Plugin | Path | Per-user OAuth identity to ClickHouse |
+|---|---|---|---|
+| `grafana-clickhouse-datasource` | [Grafana official](https://github.com/grafana/clickhouse-datasource) | `POST /api/ds/query` | No — connection uses datasource-configured credentials |
+| `vertamedia-clickhouse-datasource` | [Altinity/clickhouse-grafana](https://github.com/Altinity/clickhouse-grafana) | `GET /api/datasources/proxy/uid/<uid>/?query=…` | Yes — Grafana core forwards `Authorization: Bearer <jwt>` when the datasource has `oauthPassThru: true` and `access: proxy` |
+
+Both paths share macro substitution (`$__timeFilter`, `$__from`/`$__to`, `$__interval`/`$__interval_ms`, `${varname}`) and the row limit (default 100, max 1000). The vertamedia path is the only option today if you need per-user identity to reach ClickHouse — the official plugin's `oauthPassThru` flag is a silent no-op through v4.17.0. Tested against vertamedia v3.4.11.
+
 ### CloudWatch Querying
 
 > **Note:** CloudWatch tools are **disabled by default**. To enable them, add `cloudwatch` to your `--enabled-tools` flag.
