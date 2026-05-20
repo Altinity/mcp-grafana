@@ -334,7 +334,7 @@ var CreateDatasource = mcpgrafana.MustTool(
 
 var UpdateDatasource = mcpgrafana.MustTool(
 	"update_datasource",
-	"Update non-secret datasource fields by UID. Omitted fields are preserved. Returns a health check. For secrets, instruct the user to use the Grafana UI. Confirm before creating if the datasource doesn't exist.",
+	"Update non-secret datasource fields by UID. Omitted fields are preserved. For secrets, direct the user to the Grafana UI.",
 	updateDatasource,
 	mcp.WithTitleAnnotation("Update datasource"),
 	mcp.WithIdempotentHintAnnotation(true),
@@ -401,16 +401,16 @@ var GetDatasource = mcpgrafana.MustTool(
 )
 
 type UpdateDatasourceParams struct {
-	UID             string                 `json:"uid" jsonschema:"required,description=The UID of the datasource to update"`
-	Name            *string                `json:"name,omitempty" jsonschema:"description=New display name"`
-	Type            *string                `json:"type,omitempty" jsonschema:"description=Datasource plugin type (usually leave unchanged after create)"`
-	URL             *string                `json:"url,omitempty" jsonschema:"description=Datasource base URL"`
-	Access          *string                `json:"access,omitempty" jsonschema:"description=How Grafana reaches the datasource (proxy or direct)"`
-	Database        *string                `json:"database,omitempty" jsonschema:"description=Database name when applicable"`
-	BasicAuth       *bool                  `json:"basicAuth,omitempty" jsonschema:"description=Whether Grafana uses basic auth to the datasource"`
-	WithCredentials *bool                  `json:"withCredentials,omitempty" jsonschema:"description=Whether Grafana forwards credentials such as cookies"`
-	IsDefault       *bool                  `json:"isDefault,omitempty" jsonschema:"description=Whether this datasource should be the default"`
-	JSONData        map[string]interface{} `json:"jsonData,omitempty" jsonschema:"description=Non-secret plugin settings; when set\\, replaces jsonData on the server for this datasource"`
+	UID             string                 `json:"uid" jsonschema:"required,description=UID of the datasource to update"`
+	Name            *string                `json:"name,omitempty" jsonschema:"description=Display name"`
+	Type            *string                `json:"type,omitempty" jsonschema:"description=Plugin type"`
+	URL             *string                `json:"url,omitempty" jsonschema:"description=Base URL"`
+	Access          *string                `json:"access,omitempty" jsonschema:"description=proxy or direct"`
+	Database        *string                `json:"database,omitempty" jsonschema:"description=Database name"`
+	BasicAuth       *bool                  `json:"basicAuth,omitempty" jsonschema:"description=Enable basic auth"`
+	WithCredentials *bool                  `json:"withCredentials,omitempty" jsonschema:"description=Forward cookies/credentials"`
+	IsDefault       *bool                  `json:"isDefault,omitempty" jsonschema:"description=Make this the default datasource"`
+	JSONData        map[string]interface{} `json:"jsonData,omitempty" jsonschema:"description=Non-secret plugin settings; replaces existing jsonData when set"`
 }
 
 type UpdateDatasourceResult struct {
@@ -559,9 +559,9 @@ func checkDatasourceHealth(ctx context.Context, args CheckDatasourceHealthParams
 }
 
 type BulkCheckDatasourceHealthParams struct {
-	Type   string   `json:"type,omitempty" jsonschema:"description=Plugin type to filter (e.g. prometheus). Omit to check all."`
-	UIDs   []string `json:"uids,omitempty" jsonschema:"description=UIDs to check. Takes priority over type when set."`
-	Offset int      `json:"offset,omitempty" jsonschema:"default=0,description=Number to skip for pagination."`
+	Type   string   `json:"type,omitempty" jsonschema:"description=Plugin type to filter; omit to check all"`
+	UIDs   []string `json:"uids,omitempty" jsonschema:"description=UIDs to check; takes priority over type"`
+	Offset int      `json:"offset,omitempty" jsonschema:"default=0,description=Number to skip for pagination"`
 }
 
 type DatasourceHealthCheckResult struct {
@@ -666,7 +666,7 @@ func checkDatasourcesHealth(ctx context.Context, args BulkCheckDatasourceHealthP
 
 var CheckDatasourcesHealth = mcpgrafana.MustTool(
 	"check_datasources_health",
-	"Check datasource health in parallel. Filter by type or provide UIDs; omit both to check all. Returns per-datasource status and a summary.",
+	"Check datasource health. Filter by type or UIDs; omit both to check all.",
 	checkDatasourcesHealth,
 	mcp.WithTitleAnnotation("Check datasources health"),
 	mcp.WithIdempotentHintAnnotation(true),
