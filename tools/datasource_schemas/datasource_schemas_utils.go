@@ -123,10 +123,10 @@ type GuidanceField struct {
 }
 
 type datasourceSchemaGuidance struct {
-	Type       string         `json:"type"`
-	PluginName string         `json:"plugin_name"`
-	DocURL     string         `json:"doc_url,omitempty"`
-	Message    string         `json:"message"`
+	Type       string          `json:"type"`
+	PluginName string          `json:"plugin_name"`
+	DocURL     string          `json:"doc_url,omitempty"`
+	Message    string          `json:"message"`
 	Fields     []GuidanceField `json:"fields"`
 }
 
