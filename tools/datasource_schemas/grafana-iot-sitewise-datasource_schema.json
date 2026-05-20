@@ -1,7 +1,8 @@
 {
     "schemaVersion": "v1",
-    "pluginType": "grafana-amazonprometheus-datasource",
-    "pluginName": "Amazon Managed Service for Prometheus",
+    "pluginType": "grafana-iot-sitewise-datasource",
+    "pluginName": "AWS IoT SiteWise",
+    "docURL": "https://grafana.com/grafana/plugins/grafana-iot-sitewise-datasource/",
     "fields": [
         {
             "id": "jsonData.authType",
@@ -48,53 +49,23 @@
             "id": "jsonData.endpoint",
             "key": "endpoint",
             "label": "Endpoint",
-            "description": "Amazon Managed Prometheus workspace endpoint URL.",
+            "description": "Optional custom IoT SiteWise endpoint.",
             "valueType": "string",
-            "semanticType": "url",
             "target": "jsonData"
         },
         {
-            "id": "jsonData.sigv4Service",
-            "key": "sigv4Service",
-            "label": "SigV4 Service",
-            "description": "AWS service name for SigV4 signing. Default: aps.",
+            "id": "jsonData.edgeAuthMode",
+            "key": "edgeAuthMode",
+            "label": "Edge Auth Mode",
+            "description": "Authentication mode for edge gateway connections.",
             "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "aps"
+            "target": "jsonData"
         },
         {
-            "id": "jsonData.timeInterval",
-            "key": "timeInterval",
-            "label": "Scrape interval",
-            "description": "Sets the scrape and evaluation interval.",
-            "valueType": "string",
-            "semanticType": "duration",
-            "target": "jsonData",
-            "defaultValue": "15s"
-        },
-        {
-            "id": "jsonData.httpMethod",
-            "key": "httpMethod",
-            "label": "HTTP method",
-            "description": "HTTP method for queries.",
-            "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "POST",
-            "validations": [
-                {
-                    "type": "allowedValues",
-                    "values": [
-                        "GET",
-                        "POST"
-                    ]
-                }
-            ]
-        },
-        {
-            "id": "jsonData.customQueryParameters",
-            "key": "customQueryParameters",
-            "label": "Custom query parameters",
-            "description": "Add custom parameters to the query URL.",
+            "id": "jsonData.edgeAuthUser",
+            "key": "edgeAuthUser",
+            "label": "Edge Auth User",
+            "description": "Username for edge gateway authentication.",
             "valueType": "string",
             "target": "jsonData"
         },
@@ -124,6 +95,27 @@
             "valueType": "string",
             "semanticType": "token",
             "target": "secureJsonData"
+        },
+        {
+            "id": "secureJsonData.edgeAuthPass",
+            "key": "edgeAuthPass",
+            "label": "Edge Auth Password",
+            "description": "Password for edge gateway authentication.",
+            "valueType": "string",
+            "semanticType": "password",
+            "target": "secureJsonData"
+        },
+        {
+            "id": "secureJsonData.cert",
+            "key": "cert",
+            "label": "Certificate",
+            "description": "TLS certificate for edge gateway.",
+            "valueType": "string",
+            "target": "secureJsonData",
+            "ui": {
+                "component": "textarea",
+                "rows": 7
+            }
         }
     ],
     "groups": [
@@ -143,13 +135,13 @@
             ]
         },
         {
-            "id": "prometheus",
-            "title": "Prometheus settings",
+            "id": "edge",
+            "title": "Edge Gateway",
             "fieldRefs": [
-                "jsonData.sigv4Service",
-                "jsonData.timeInterval",
-                "jsonData.httpMethod",
-                "jsonData.customQueryParameters"
+                "jsonData.edgeAuthMode",
+                "jsonData.edgeAuthUser",
+                "secureJsonData.edgeAuthPass",
+                "secureJsonData.cert"
             ]
         }
     ]

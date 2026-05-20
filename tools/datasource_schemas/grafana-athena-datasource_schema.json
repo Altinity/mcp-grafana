@@ -1,7 +1,8 @@
 {
     "schemaVersion": "v1",
-    "pluginType": "grafana-amazonprometheus-datasource",
-    "pluginName": "Amazon Managed Service for Prometheus",
+    "pluginType": "grafana-athena-datasource",
+    "pluginName": "Amazon Athena",
+    "docURL": "https://grafana.com/grafana/plugins/grafana-athena-datasource/",
     "fields": [
         {
             "id": "jsonData.authType",
@@ -16,7 +17,7 @@
             "id": "jsonData.defaultRegion",
             "key": "defaultRegion",
             "label": "Default Region",
-            "description": "AWS region.",
+            "description": "AWS region for Athena queries.",
             "valueType": "string",
             "target": "jsonData"
         },
@@ -48,55 +49,45 @@
             "id": "jsonData.endpoint",
             "key": "endpoint",
             "label": "Endpoint",
-            "description": "Amazon Managed Prometheus workspace endpoint URL.",
+            "description": "Optional custom endpoint for Athena.",
             "valueType": "string",
-            "semanticType": "url",
+            "target": "jsonData"
+        },
+        {
+            "id": "jsonData.catalog",
+            "key": "catalog",
+            "label": "Catalog",
+            "description": "Athena data catalog name.",
+            "valueType": "string",
             "target": "jsonData"
         },
         {
-            "id": "jsonData.sigv4Service",
-            "key": "sigv4Service",
-            "label": "SigV4 Service",
-            "description": "AWS service name for SigV4 signing. Default: aps.",
-            "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "aps"
-        },
-        {
-            "id": "jsonData.timeInterval",
-            "key": "timeInterval",
-            "label": "Scrape interval",
-            "description": "Sets the scrape and evaluation interval.",
-            "valueType": "string",
-            "semanticType": "duration",
-            "target": "jsonData",
-            "defaultValue": "15s"
-        },
-        {
-            "id": "jsonData.httpMethod",
-            "key": "httpMethod",
-            "label": "HTTP method",
-            "description": "HTTP method for queries.",
-            "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "POST",
-            "validations": [
-                {
-                    "type": "allowedValues",
-                    "values": [
-                        "GET",
-                        "POST"
-                    ]
-                }
-            ]
-        },
-        {
-            "id": "jsonData.customQueryParameters",
-            "key": "customQueryParameters",
-            "label": "Custom query parameters",
-            "description": "Add custom parameters to the query URL.",
+            "id": "jsonData.database",
+            "key": "database",
+            "label": "Database",
+            "description": "Athena database name.",
             "valueType": "string",
             "target": "jsonData"
+        },
+        {
+            "id": "jsonData.workgroup",
+            "key": "workgroup",
+            "label": "Workgroup",
+            "description": "Athena workgroup name.",
+            "valueType": "string",
+            "target": "jsonData"
+        },
+        {
+            "id": "jsonData.outputLocation",
+            "key": "outputLocation",
+            "label": "Output Location",
+            "description": "S3 output location for query results (e.g. s3://bucket/path).",
+            "valueType": "string",
+            "target": "jsonData",
+            "ui": {
+                "component": "input",
+                "placeholder": "s3://bucket/path"
+            }
         },
         {
             "id": "secureJsonData.accessKey",
@@ -143,13 +134,13 @@
             ]
         },
         {
-            "id": "prometheus",
-            "title": "Prometheus settings",
+            "id": "athena-details",
+            "title": "Athena details",
             "fieldRefs": [
-                "jsonData.sigv4Service",
-                "jsonData.timeInterval",
-                "jsonData.httpMethod",
-                "jsonData.customQueryParameters"
+                "jsonData.catalog",
+                "jsonData.database",
+                "jsonData.workgroup",
+                "jsonData.outputLocation"
             ]
         }
     ]

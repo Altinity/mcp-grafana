@@ -1,7 +1,8 @@
 {
     "schemaVersion": "v1",
-    "pluginType": "grafana-amazonprometheus-datasource",
-    "pluginName": "Amazon Managed Service for Prometheus",
+    "pluginType": "grafana-x-ray-datasource",
+    "pluginName": "AWS X-Ray",
+    "docURL": "https://grafana.com/grafana/plugins/grafana-x-ray-datasource/",
     "fields": [
         {
             "id": "jsonData.authType",
@@ -48,53 +49,7 @@
             "id": "jsonData.endpoint",
             "key": "endpoint",
             "label": "Endpoint",
-            "description": "Amazon Managed Prometheus workspace endpoint URL.",
-            "valueType": "string",
-            "semanticType": "url",
-            "target": "jsonData"
-        },
-        {
-            "id": "jsonData.sigv4Service",
-            "key": "sigv4Service",
-            "label": "SigV4 Service",
-            "description": "AWS service name for SigV4 signing. Default: aps.",
-            "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "aps"
-        },
-        {
-            "id": "jsonData.timeInterval",
-            "key": "timeInterval",
-            "label": "Scrape interval",
-            "description": "Sets the scrape and evaluation interval.",
-            "valueType": "string",
-            "semanticType": "duration",
-            "target": "jsonData",
-            "defaultValue": "15s"
-        },
-        {
-            "id": "jsonData.httpMethod",
-            "key": "httpMethod",
-            "label": "HTTP method",
-            "description": "HTTP method for queries.",
-            "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "POST",
-            "validations": [
-                {
-                    "type": "allowedValues",
-                    "values": [
-                        "GET",
-                        "POST"
-                    ]
-                }
-            ]
-        },
-        {
-            "id": "jsonData.customQueryParameters",
-            "key": "customQueryParameters",
-            "label": "Custom query parameters",
-            "description": "Add custom parameters to the query URL.",
+            "description": "Optional custom X-Ray endpoint.",
             "valueType": "string",
             "target": "jsonData"
         },
@@ -140,16 +95,6 @@
                 "secureJsonData.accessKey",
                 "secureJsonData.secretKey",
                 "secureJsonData.sessionToken"
-            ]
-        },
-        {
-            "id": "prometheus",
-            "title": "Prometheus settings",
-            "fieldRefs": [
-                "jsonData.sigv4Service",
-                "jsonData.timeInterval",
-                "jsonData.httpMethod",
-                "jsonData.customQueryParameters"
             ]
         }
     ]

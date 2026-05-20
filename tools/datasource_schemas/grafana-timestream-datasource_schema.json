@@ -1,7 +1,8 @@
 {
     "schemaVersion": "v1",
-    "pluginType": "grafana-amazonprometheus-datasource",
-    "pluginName": "Amazon Managed Service for Prometheus",
+    "pluginType": "grafana-timestream-datasource",
+    "pluginName": "Amazon Timestream",
+    "docURL": "https://grafana.com/grafana/plugins/grafana-timestream-datasource/",
     "fields": [
         {
             "id": "jsonData.authType",
@@ -16,7 +17,7 @@
             "id": "jsonData.defaultRegion",
             "key": "defaultRegion",
             "label": "Default Region",
-            "description": "AWS region.",
+            "description": "AWS region for Timestream queries.",
             "valueType": "string",
             "target": "jsonData"
         },
@@ -48,53 +49,31 @@
             "id": "jsonData.endpoint",
             "key": "endpoint",
             "label": "Endpoint",
-            "description": "Amazon Managed Prometheus workspace endpoint URL.",
+            "description": "Optional custom Timestream endpoint.",
             "valueType": "string",
-            "semanticType": "url",
             "target": "jsonData"
         },
         {
-            "id": "jsonData.sigv4Service",
-            "key": "sigv4Service",
-            "label": "SigV4 Service",
-            "description": "AWS service name for SigV4 signing. Default: aps.",
+            "id": "jsonData.defaultDatabase",
+            "key": "defaultDatabase",
+            "label": "Default Database",
+            "description": "Default Timestream database.",
             "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "aps"
+            "target": "jsonData"
         },
         {
-            "id": "jsonData.timeInterval",
-            "key": "timeInterval",
-            "label": "Scrape interval",
-            "description": "Sets the scrape and evaluation interval.",
+            "id": "jsonData.defaultTable",
+            "key": "defaultTable",
+            "label": "Default Table",
+            "description": "Default Timestream table.",
             "valueType": "string",
-            "semanticType": "duration",
-            "target": "jsonData",
-            "defaultValue": "15s"
+            "target": "jsonData"
         },
         {
-            "id": "jsonData.httpMethod",
-            "key": "httpMethod",
-            "label": "HTTP method",
-            "description": "HTTP method for queries.",
-            "valueType": "string",
-            "target": "jsonData",
-            "defaultValue": "POST",
-            "validations": [
-                {
-                    "type": "allowedValues",
-                    "values": [
-                        "GET",
-                        "POST"
-                    ]
-                }
-            ]
-        },
-        {
-            "id": "jsonData.customQueryParameters",
-            "key": "customQueryParameters",
-            "label": "Custom query parameters",
-            "description": "Add custom parameters to the query URL.",
+            "id": "jsonData.defaultMeasure",
+            "key": "defaultMeasure",
+            "label": "Default Measure",
+            "description": "Default Timestream measure.",
             "valueType": "string",
             "target": "jsonData"
         },
@@ -143,13 +122,12 @@
             ]
         },
         {
-            "id": "prometheus",
-            "title": "Prometheus settings",
+            "id": "timestream-details",
+            "title": "Timestream details",
             "fieldRefs": [
-                "jsonData.sigv4Service",
-                "jsonData.timeInterval",
-                "jsonData.httpMethod",
-                "jsonData.customQueryParameters"
+                "jsonData.defaultDatabase",
+                "jsonData.defaultTable",
+                "jsonData.defaultMeasure"
             ]
         }
     ]
