@@ -401,14 +401,14 @@ var GetDatasource = mcpgrafana.MustTool(
 )
 
 type UpdateDatasourceParams struct {
-	UID             string                 `json:"uid" jsonschema:"required,description=UID of the datasource to update"`
-	Name            *string                `json:"name,omitempty" jsonschema:"description=Display name"`
-	URL             *string                `json:"url,omitempty" jsonschema:"description=Base URL"`
-	Access          *string                `json:"access,omitempty" jsonschema:"description=proxy or direct"`
-	Database        *string                `json:"database,omitempty" jsonschema:"description=Database name"`
-	BasicAuth       *bool                  `json:"basicAuth,omitempty" jsonschema:"description=Enable basic auth"`
-	IsDefault       *bool                  `json:"isDefault,omitempty" jsonschema:"description=Make this the default datasource"`
-	JSONData        map[string]interface{} `json:"jsonData,omitempty" jsonschema:"description=Non-secret plugin settings; replaces existing jsonData when set"`
+	UID       string                 `json:"uid" jsonschema:"required,description=UID of the datasource to update"`
+	Name      *string                `json:"name,omitempty" jsonschema:"description=Display name"`
+	URL       *string                `json:"url,omitempty" jsonschema:"description=Base URL"`
+	Access    *string                `json:"access,omitempty" jsonschema:"description=proxy or direct"`
+	Database  *string                `json:"database,omitempty" jsonschema:"description=Database name"`
+	BasicAuth *bool                  `json:"basicAuth,omitempty" jsonschema:"description=Enable basic auth"`
+	IsDefault *bool                  `json:"isDefault,omitempty" jsonschema:"description=Make this the default datasource"`
+	JSONData  map[string]interface{} `json:"jsonData,omitempty" jsonschema:"description=Non-secret plugin settings; replaces existing jsonData when set"`
 }
 
 type UpdateDatasourceResult struct {
