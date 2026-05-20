@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,43 +11,61 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	mcpgrafana "github.com/grafana/mcp-grafana"
 )
 
-// vertamediaDefaultDatabase is the fallback default database when neither the tool
-// invocation nor the datasource jsonData specifies one. ClickHouse itself uses
-// "default" if no database is selected on a query.
+// vertamediaDefaultDatabase is the fallback default database when neither the
+// datasource jsonData nor the explicit URL specifies one.
 const vertamediaDefaultDatabase = "default"
 
-// vertamediaClickHouseClient routes ClickHouse queries through Grafana's generic
-// datasource proxy for the vertamedia-clickhouse-datasource plugin
-// (https://github.com/Altinity/clickhouse-grafana).
+// vertamediaQueryTimeout caps each ClickHouse HTTP call. Tuned against the
+// row-limit cap (max 1000 rows), not for OLAP-scale exports.
+const vertamediaQueryTimeout = 30 * time.Second
+
+// vertamediaClickHouseClient issues ClickHouse queries directly against the
+// ClickHouse HTTP interface, using the inbound user's bearer token as the
+// per-user identity. Discovery of the CH endpoint and database default still
+// goes through Grafana (getDatasourceByUID), so the datasource's existence
+// and the user's RBAC visibility are still enforced — but the query itself
+// bypasses Grafana's datasource proxy.
 //
-// Unlike the official plugin path which posts to /api/ds/query with a plugin-specific
-// dataframe payload, vertamedia exposes the ClickHouse HTTP interface directly through
-// /api/datasources/proxy/uid/<uid>/. Grafana core handles auth (including OAuth
-// pass-through via Authorization: Bearer <jwt> when oauthPassThru=true on the datasource),
-// so the inbound X-JWT-Assertion identity that mcp-grafana already carries propagates
-// end-to-end without any new wiring.
+// Why we bypass the proxy: Grafana's oauthPassThru only forwards an OAuth
+// token when the user has a Grafana-managed OAuth session (i.e., the
+// cookie-based browser login path). The MCP server's path establishes
+// identity via X-JWT-Assertion → Grafana [auth.jwt], which resolves the
+// user but does NOT mint an OAuth session, so oauthPassThru has nothing
+// to forward. The dashboard works, the MCP proxy path doesn't, both are
+// consistent with how Grafana's auth subsystems compose.
+//
+// Sending the inbound bearer directly to ClickHouse sidesteps the gap:
+// ClickHouse's token_processor / JWKS validates it the same way it would
+// have validated the Grafana-forwarded copy. Net auth posture: identical.
+//
+// Tradeoff: this is a fork-only divergence from upstream mcp-grafana,
+// which exclusively talks through the Grafana proxy. Not a candidate for
+// upstream PR.
 type vertamediaClickHouseClient struct {
 	httpClient      *http.Client
-	baseURL         string
-	dsUID           string
+	chURL           string
+	bearer          string
 	defaultDatabase string
 }
 
-func newVertamediaClickHouseClient(httpClient *http.Client, baseURL, dsUID string, jsonData any) *vertamediaClickHouseClient {
-	c := &vertamediaClickHouseClient{
-		httpClient:      httpClient,
-		baseURL:         baseURL,
-		dsUID:           dsUID,
-		defaultDatabase: vertamediaDefaultDatabase,
+func newVertamediaClickHouseClient(chURL, bearer, defaultDatabase string, tlsSkipVerify bool) *vertamediaClickHouseClient {
+	transport := http.DefaultTransport
+	if tlsSkipVerify {
+		transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
-	if m, ok := jsonData.(map[string]any); ok {
-		if v, ok := m["defaultDatabase"].(string); ok && v != "" {
-			c.defaultDatabase = v
-		}
+	if defaultDatabase == "" {
+		defaultDatabase = vertamediaDefaultDatabase
 	}
-	return c
+	return &vertamediaClickHouseClient{
+		httpClient:      &http.Client{Transport: transport, Timeout: vertamediaQueryTimeout},
+		chURL:           strings.TrimRight(chURL, "/"),
+		bearer:          bearer,
+		defaultDatabase: defaultDatabase,
+	}
 }
 
 // vertamediaQueryResponse mirrors the ClickHouse HTTP JSON envelope emitted by
@@ -78,18 +97,22 @@ func ensureFormatJSON(sql string) string {
 }
 
 func (c *vertamediaClickHouseClient) query(ctx context.Context, _ string, rawSQL string, _, _ time.Time) (*clickHouseQueryResponse, error) {
-	sql := ensureFormatJSON(rawSQL)
+	if c.bearer == "" {
+		return nil, fmt.Errorf("vertamedia client requires an inbound user bearer (GrafanaConfig.JWTAssertion); none was set on the request context — is the OAuth broker enabled?")
+	}
 
+	sql := ensureFormatJSON(rawSQL)
 	params := url.Values{}
 	params.Set("query", sql)
 	params.Set("database", c.defaultDatabase)
-	endpoint := fmt.Sprintf("%s/api/datasources/proxy/uid/%s/?%s", c.baseURL, url.PathEscape(c.dsUID), params.Encode())
+	endpoint := c.chURL + "/?" + params.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.bearer)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -104,7 +127,7 @@ func (c *vertamediaClickHouseClient) query(ctx context.Context, _ string, rawSQL
 		if code != "" {
 			return nil, fmt.Errorf("clickhouse error (code=%s): %s", code, msg)
 		}
-		return nil, fmt.Errorf("vertamedia proxy returned status %d: %s", resp.StatusCode, msg)
+		return nil, fmt.Errorf("clickhouse returned status %d: %s", resp.StatusCode, msg)
 	}
 
 	bodyBytes, err := readResponseBody(resp.Body, defaultResponseLimitBytes)
@@ -174,4 +197,23 @@ func grafanaFieldTypeFromCH(t string) string {
 	default:
 		return "string"
 	}
+}
+
+// vertamediaDatasourceConfig pulls the bits the adapter needs from a Grafana
+// datasource model + request context. Factored out so the dispatch in
+// newClickHouseClient stays readable.
+func vertamediaDatasourceConfig(ctx context.Context, chURL string, jsonData any) (defaultDatabase string, tlsSkipVerify bool, bearer string) {
+	defaultDatabase = vertamediaDefaultDatabase
+	if m, ok := jsonData.(map[string]any); ok {
+		if v, ok := m["defaultDatabase"].(string); ok && v != "" {
+			defaultDatabase = v
+		}
+		if v, ok := m["tlsSkipVerify"].(bool); ok {
+			tlsSkipVerify = v
+		}
+	}
+	cfg := mcpgrafana.GrafanaConfigFromContext(ctx)
+	bearer = cfg.JWTAssertion
+	_ = chURL // accepted for symmetry with the call site; URL parsing happens at use
+	return
 }

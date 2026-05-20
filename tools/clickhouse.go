@@ -148,10 +148,11 @@ func newClickHouseClient(ctx context.Context, uid string) (clickHouseClient, err
 	case ClickHouseDatasourceType:
 		return &officialClickHouseClient{httpClient: httpClient, baseURL: baseURL}, nil
 	case VertamediaClickHouseDatasourceType:
-		if string(ds.Access) != "" && string(ds.Access) != "proxy" {
-			return nil, fmt.Errorf("vertamedia datasource %s must use access=proxy (got %q); browser-direct access bypasses Grafana and cannot carry per-user OAuth identity", uid, ds.Access)
+		if ds.URL == "" {
+			return nil, fmt.Errorf("vertamedia datasource %s has no url configured; cannot reach ClickHouse directly", uid)
 		}
-		return newVertamediaClickHouseClient(httpClient, baseURL, uid, ds.JSONData), nil
+		defaultDB, tlsSkipVerify, bearer := vertamediaDatasourceConfig(ctx, ds.URL, ds.JSONData)
+		return newVertamediaClickHouseClient(ds.URL, bearer, defaultDB, tlsSkipVerify), nil
 	default:
 		return nil, fmt.Errorf("datasource %s is of type %s, not %s or %s", uid, ds.Type, ClickHouseDatasourceType, VertamediaClickHouseDatasourceType)
 	}

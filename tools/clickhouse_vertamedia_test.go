@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -33,51 +32,43 @@ func TestEnsureFormatJSON(t *testing.T) {
 
 func TestGrafanaFieldTypeFromCH(t *testing.T) {
 	cases := map[string]string{
-		"String":                "string",
-		"UInt64":                "number",
-		"Int32":                 "number",
-		"Float64":               "number",
-		"Decimal(10,2)":         "number",
-		"DateTime":              "time",
-		"DateTime64(3)":         "time",
-		"Date":                  "time",
-		"Bool":                  "boolean",
-		"Nullable(String)":      "string",
-		"Nullable(Int64)":       "number",
+		"String":                 "string",
+		"UInt64":                 "number",
+		"Int32":                  "number",
+		"Float64":                "number",
+		"Decimal(10,2)":          "number",
+		"DateTime":               "time",
+		"DateTime64(3)":          "time",
+		"Date":                   "time",
+		"Bool":                   "boolean",
+		"Nullable(String)":       "string",
+		"Nullable(Int64)":        "number",
 		"LowCardinality(String)": "string",
-		"Array(Int64)":          "string", // unknown → string fallback
+		"Array(Int64)":           "string", // unknown → string fallback
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, grafanaFieldTypeFromCH(in), "input=%q", in)
 	}
 }
 
-// fakeGrafanaProxy spins up an httptest.Server that mimics Grafana's
-// /api/datasources/proxy/uid/<uid>/ endpoint as observed against the live
-// vertamedia datasource. It records the inbound request for assertions.
-type fakeGrafanaProxy struct {
-	server      *httptest.Server
-	lastReq     *http.Request
-	lastRawQuery string
-	body        []byte
-	status      int
-	headers     http.Header
+// fakeClickHouse mimics the ClickHouse HTTP endpoint that the vertamedia
+// adapter now talks to directly. Records the inbound request for assertions.
+type fakeClickHouse struct {
+	server  *httptest.Server
+	lastReq *http.Request
+	body    []byte
+	status  int
+	headers http.Header
 }
 
-func newFakeProxy(t *testing.T, dsUID string) *fakeGrafanaProxy {
+func newFakeCH(t *testing.T) *fakeClickHouse {
 	t.Helper()
-	f := &fakeGrafanaProxy{
+	f := &fakeClickHouse{
 		status:  http.StatusOK,
 		headers: http.Header{},
 	}
-	prefix := "/api/datasources/proxy/uid/" + dsUID + "/"
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, prefix) {
-			http.NotFound(w, r)
-			return
-		}
 		f.lastReq = r.Clone(context.Background())
-		f.lastRawQuery = r.URL.RawQuery
 		for k, vs := range f.headers {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -90,14 +81,14 @@ func newFakeProxy(t *testing.T, dsUID string) *fakeGrafanaProxy {
 	return f
 }
 
-func (f *fakeGrafanaProxy) setSuccessBody(v any) {
+func (f *fakeClickHouse) setSuccessBody(v any) {
 	b, _ := json.Marshal(v)
 	f.body = b
 	f.status = http.StatusOK
 	f.headers.Set("Content-Type", "application/json")
 }
 
-func (f *fakeGrafanaProxy) setErrorBody(status int, code, msg string) {
+func (f *fakeClickHouse) setErrorBody(status int, code, msg string) {
 	f.body = []byte(msg)
 	f.status = status
 	f.headers = http.Header{}
@@ -108,8 +99,7 @@ func (f *fakeGrafanaProxy) setErrorBody(status int, code, msg string) {
 }
 
 func TestVertamediaClient_Query_Success(t *testing.T) {
-	const dsUID = "otel"
-	fake := newFakeProxy(t, dsUID)
+	fake := newFakeCH(t)
 	fake.setSuccessBody(vertamediaQueryResponse{
 		Meta: []struct {
 			Name string `json:"name"`
@@ -125,18 +115,21 @@ func TestVertamediaClient_Query_Success(t *testing.T) {
 		Rows: 2,
 	})
 
-	client := newVertamediaClickHouseClient(fake.server.Client(), fake.server.URL, dsUID, map[string]any{"defaultDatabase": "claude_otel"})
+	client := newVertamediaClickHouseClient(fake.server.URL, "test-jwt-token", "claude_otel", false)
 
-	resp, err := client.query(context.Background(), dsUID, "SELECT model, n FROM t", time.Time{}, time.Time{})
+	resp, err := client.query(context.Background(), "otel", "SELECT model, n FROM t", time.Time{}, time.Time{})
 	require.NoError(t, err)
 
-	// Inbound request shape matches what the live dashboard sends.
+	// Inbound request shape: direct CH call, not /api/datasources/proxy/...
 	require.NotNil(t, fake.lastReq)
 	assert.Equal(t, http.MethodGet, fake.lastReq.Method)
-	assert.Equal(t, "/api/datasources/proxy/uid/"+dsUID+"/", fake.lastReq.URL.Path)
+	assert.Equal(t, "/", fake.lastReq.URL.Path)
 	q := fake.lastReq.URL.Query()
 	assert.Equal(t, "claude_otel", q.Get("database"))
 	assert.Equal(t, "SELECT model, n FROM t FORMAT JSON", q.Get("query"))
+	// The user's bearer reaches CH directly — this is the load-bearing
+	// identity mechanism for the whole feature.
+	assert.Equal(t, "Bearer test-jwt-token", fake.lastReq.Header.Get("Authorization"))
 
 	// Translated to one frame, two columns, two rows, in column-major order.
 	r := resp.Results["A"]
@@ -153,59 +146,44 @@ func TestVertamediaClient_Query_Success(t *testing.T) {
 }
 
 func TestVertamediaClient_Query_ErrorEnvelope(t *testing.T) {
-	const dsUID = "otel"
-	fake := newFakeProxy(t, dsUID)
+	fake := newFakeCH(t)
 	fake.setErrorBody(http.StatusForbidden, "516",
 		"Code: 516. DB::Exception: user@example.com: Authentication failed. (AUTHENTICATION_FAILED)\n")
 
-	client := newVertamediaClickHouseClient(fake.server.Client(), fake.server.URL, dsUID, nil)
+	client := newVertamediaClickHouseClient(fake.server.URL, "test-jwt-token", "default", false)
 
-	_, err := client.query(context.Background(), dsUID, "SELECT 1", time.Time{}, time.Time{})
+	_, err := client.query(context.Background(), "otel", "SELECT 1", time.Time{}, time.Time{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "code=516")
 	assert.Contains(t, err.Error(), "AUTHENTICATION_FAILED")
 }
 
 func TestVertamediaClient_Query_DefaultDatabaseFallback(t *testing.T) {
-	const dsUID = "otel"
-	fake := newFakeProxy(t, dsUID)
+	fake := newFakeCH(t)
 	fake.setSuccessBody(vertamediaQueryResponse{Meta: nil, Data: nil, Rows: 0})
 
-	// No defaultDatabase in jsonData → fallback to "default".
-	client := newVertamediaClickHouseClient(fake.server.Client(), fake.server.URL, dsUID, nil)
-	_, err := client.query(context.Background(), dsUID, "SELECT 1", time.Time{}, time.Time{})
+	// Empty defaultDatabase → constructor falls back to "default".
+	client := newVertamediaClickHouseClient(fake.server.URL, "test-jwt-token", "", false)
+	_, err := client.query(context.Background(), "otel", "SELECT 1", time.Time{}, time.Time{})
 	require.NoError(t, err)
 	assert.Equal(t, "default", fake.lastReq.URL.Query().Get("database"))
 }
 
-// TestVertamediaClient_TransportPropagatesIdentityHeaders ensures that any header
-// installed by the inbound HTTP client (in production, X-JWT-Assertion via
-// JWTAssertionRoundTripper) is preserved on the outbound proxy call. The whole
-// motivation for this adapter is per-user OAuth identity reaching ClickHouse.
-func TestVertamediaClient_TransportPropagatesIdentityHeaders(t *testing.T) {
-	const dsUID = "otel"
-	fake := newFakeProxy(t, dsUID)
+func TestVertamediaClient_Query_RequiresBearer(t *testing.T) {
+	// No fake server needed — the request should fail before any HTTP call.
+	client := newVertamediaClickHouseClient("http://example.invalid", "", "default", false)
+	_, err := client.query(context.Background(), "otel", "SELECT 1", time.Time{}, time.Time{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires an inbound user bearer")
+}
+
+func TestVertamediaClient_TrimsTrailingSlash(t *testing.T) {
+	fake := newFakeCH(t)
 	fake.setSuccessBody(vertamediaQueryResponse{})
 
-	httpClient := &http.Client{Transport: &headerInjectingTransport{
-		base:  http.DefaultTransport,
-		key:   "X-JWT-Assertion",
-		value: "test-jwt-token",
-	}}
-
-	client := newVertamediaClickHouseClient(httpClient, fake.server.URL, dsUID, nil)
-	_, err := client.query(context.Background(), dsUID, "SELECT 1", time.Time{}, time.Time{})
+	// Construct with a trailing slash on chURL; the client should normalise.
+	client := newVertamediaClickHouseClient(fake.server.URL+"/", "test-jwt-token", "default", false)
+	_, err := client.query(context.Background(), "otel", "SELECT 1", time.Time{}, time.Time{})
 	require.NoError(t, err)
-	assert.Equal(t, "test-jwt-token", fake.lastReq.Header.Get("X-JWT-Assertion"))
+	assert.Equal(t, "/", fake.lastReq.URL.Path)
 }
-
-type headerInjectingTransport struct {
-	base       http.RoundTripper
-	key, value string
-}
-
-func (h *headerInjectingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r.Header.Set(h.key, h.value)
-	return h.base.RoundTrip(r)
-}
-

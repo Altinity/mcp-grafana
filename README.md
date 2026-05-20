@@ -102,12 +102,18 @@ The dashboard tools now include several strategies to manage context window usag
 
 **Supported ClickHouse datasource plugins**
 
-| Plugin type | Plugin | Path | Per-user OAuth identity to ClickHouse |
+| Plugin type | Plugin | Path | Per-user identity to ClickHouse |
 |---|---|---|---|
-| `grafana-clickhouse-datasource` | [Grafana official](https://github.com/grafana/clickhouse-datasource) | `POST /api/ds/query` | No — connection uses datasource-configured credentials |
-| `vertamedia-clickhouse-datasource` | [Altinity/clickhouse-grafana](https://github.com/Altinity/clickhouse-grafana) | `GET /api/datasources/proxy/uid/<uid>/?query=…` | Yes — Grafana core forwards `Authorization: Bearer <jwt>` when the datasource has `oauthPassThru: true` and `access: proxy` |
+| `grafana-clickhouse-datasource` | [Grafana official](https://github.com/grafana/clickhouse-datasource) | `POST /api/ds/query` through Grafana | No — connection uses datasource-configured credentials |
+| `vertamedia-clickhouse-datasource` | [Altinity/clickhouse-grafana](https://github.com/Altinity/clickhouse-grafana) | Direct call to ClickHouse at `ds.URL` with `Authorization: Bearer <jwt>` | Yes — the inbound user bearer is forwarded straight to ClickHouse |
 
-Both paths share macro substitution (`$__timeFilter`, `$__from`/`$__to`, `$__interval`/`$__interval_ms`, `${varname}`) and the row limit (default 100, max 1000). The vertamedia path is the only option today if you need per-user identity to reach ClickHouse — the official plugin's `oauthPassThru` flag is a silent no-op through v4.17.0. Tested against vertamedia v3.4.11.
+For the vertamedia path, mcp-grafana uses Grafana only for **discovery** (the datasource must exist and the calling user must have permission to see it via `getDatasourceByUID`); the actual query bypasses Grafana's datasource proxy and is issued directly against the URL configured on the datasource. ClickHouse validates the JWT via its own `token_processor` / JWKS configuration.
+
+Why direct instead of proxy: Grafana's `oauthPassThru` only forwards an OAuth token when the user has a Grafana-managed OAuth session (the cookie-based browser login path). The MCP server establishes identity via `X-JWT-Assertion` → Grafana `[auth.jwt]`, which resolves the user but does not mint an OAuth session, so `oauthPassThru` has nothing to forward. Sending the inbound bearer directly to ClickHouse sidesteps the gap with no loss of authentication strength — ClickHouse runs the same JWT validation it would have run on a Grafana-forwarded copy.
+
+This is a **fork-only** divergence from upstream `grafana/mcp-grafana`, whose ClickHouse tools exclusively talk through the Grafana proxy.
+
+Both paths share macro substitution (`$__timeFilter`, `$__from`/`$__to`, `$__interval`/`$__interval_ms`, `${varname}`) and the row limit (default 100, max 1000). Tested against vertamedia v3.4.11.
 
 ### CloudWatch Querying
 
