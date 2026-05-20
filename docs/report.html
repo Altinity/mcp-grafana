@@ -294,6 +294,7 @@
     <p>Altinity completed a proof-of-concept demonstrating that AI assistant clients (claude.ai, ChatGPT) can query company ClickHouse data <strong>with full per-user identity propagation</strong> — every query carries the authenticated user's JWT so that ClickHouse RBAC knows exactly who ran it, producing a verifiable audit trail in <code>system.query_log</code>.</p>
     <p>The integration runs on the <strong>demo.altinity.cloud Kubernetes cluster</strong> and threads together Google OAuth, Rauthy (OIDC broker), Grafana 12.4.3, a forked mcp-grafana broker, and two ClickHouse clusters. The critical insight was that Google issues <em>opaque</em> access tokens — not JWTs — so a Rauthy broker layer is required to produce the RS256 JWTs that ClickHouse's token processor expects.</p>
     <p>The result: calling <code>query_clickhouse(datasource="otel", query="SELECT currentUser()")</code> from claude.ai returns <strong>btyshkevich@altinity.com</strong>, confirmed in ClickHouse query logs. The architecture is extensible to production with PVC-backed storage, row-level security, and DCR-based client registration.</p>
+    <p><strong>Update — 2026-05-20 (round 2):</strong> Resolved a previously-hidden collision between <code>auth.jwt</code> (used by mcp-grafana) and <code>auth.generic_oauth</code> (browser users) that flipped <code>user_auth.auth_module</code> to <code>jwt</code> for shared users and silently disabled <code>oauthPassThru</code> on browser-side dashboard queries. Fix is config-only: enable Grafana's <code>improvedExternalSessionHandling</code> feature toggle, which moves OAuth tokens into a per-session <code>user_external_session</code> table instead of the most-recent-row-wins <code>user_auth</code> table. Both paths now coexist for the same user. Separately, fixed a dashboard JSON case-sensitivity bug where uppercase <code>"format": "TABLE"</code> in the new <code>claude-usage-reporting</code> dashboard caused all stat panels to render empty.</p>
   </div>
 </section>
 
@@ -691,6 +692,30 @@
       </div>
     </div>
 
+    <div class="problem-card">
+      <div class="problem-card-header">
+        <div class="problem-icon solved">🪢</div>
+        <div class="problem-title">auth.jwt and oauthPassThru collide on shared users</div>
+      </div>
+      <p class="problem-desc">With both <code>auth.jwt</code> (for mcp-grafana) and <code>auth.generic_oauth</code> (for browser users) enabled and matched to the same Grafana user by <code>email</code>, every mcp-grafana hop writes a new <code>user_auth(user_id, auth_module='jwt')</code> row. Grafana's <code>oauthtoken</code> middleware then reads back the <em>single most-recent</em> <code>user_auth</code> row via <code>GetAuthInfo</code> and gates on <code>HasPrefix(authmodule, "oauth_")</code> — the jwt row clears the gate FALSE, the browser's data-proxy hop to CH goes out without a Bearer, CH falls back to <code>default</code> → <em>"Code 194: REQUIRED_PASSWORD"</em>, panels go blank.</p>
+      <div class="solution-box">
+        <div class="solution-label">Solution (config-only, 2026-05-20)</div>
+        Enable Grafana's <code>improvedExternalSessionHandling</code> feature toggle. OAuth tokens migrate from <code>user_auth.oauth_token</code> (most-recent-wins) into a per-session <code>user_external_session</code> table; the middleware now reads the session-scoped row, so the two auth modules stop colliding. <strong>Migration gotcha:</strong> existing logged-in users must re-login once after enabling the flag so a <code>user_external_session</code> row is minted for their cookie — until then they still hit the old gate.
+      </div>
+    </div>
+
+    <div class="problem-card">
+      <div class="problem-card-header">
+        <div class="problem-icon solved">🔤</div>
+        <div class="problem-title">Stat panels showed "No data" even though queries succeeded</div>
+      </div>
+      <p class="problem-desc">The <code>claude-usage-reporting</code> dashboard's Executive Summary KPI panels (<code>stat</code> type, <code>format: "TABLE"</code>) returned valid single-row results from CH but rendered empty. <em>Inspect → Data</em> showed <code>rows: 1</code> in the response, but the panel reduce-op (<code>lastNotNull</code>) found nothing. Root cause: the dashboard JSON used uppercase <code>"TABLE"</code> / <code>"TIME_SERIES"</code> (legacy Grafana constants); the vertamedia plugin's response dispatcher in <code>src/datasource/datasource.ts:404</code> does <code>target.format === 'table'</code> <strong>case-sensitively</strong>. Every stat target fell through to the timeseries branch, which expects a timestamp column, producing empty frames.</p>
+      <div class="solution-box">
+        <div class="solution-label">Solution</div>
+        Patch the dashboard JSON via Grafana's admin API to lowercase all <code>target.format</code> values. The Grafana UI normalises new edits to lowercase, but it does NOT retroactively fix existing JSON — exports from other tools or hand-written dashboards routinely use the uppercase legacy form, which silently breaks stat panels.
+      </div>
+    </div>
+
   </div>
 </section>
 
@@ -737,7 +762,15 @@
         <tr>
           <td>Grafana browser dashboard</td>
           <td>otel</td>
-          <td>Token-usage dashboard panel load</td>
+          <td><code>claude-usage-reporting</code> Executive Summary KPI panels</td>
+          <td>Per-user spend/requests/tokens/cache-hit/active-users rendered with real values</td>
+          <td><code>btyshkevich@altinity.com</code> (oauthPassThru via session-scoped <code>user_external_session</code>)</td>
+          <td><span class="badge badge-green">PASS ✅</span></td>
+        </tr>
+        <tr>
+          <td>Grafana browser dashboard</td>
+          <td>otel</td>
+          <td>Older <code>token-usage</code> dashboard, same datasource</td>
           <td>Per-user Claude API usage data rendered</td>
           <td><code>btyshkevich@altinity.com</code> (oauthPassThru)</td>
           <td><span class="badge badge-green">PASS ✅</span></td>
@@ -800,10 +833,10 @@
         <div class="issue-num">2</div>
         <div class="issue-content">
           <div class="issue-header">
-            <span class="issue-title">Grafana ephemeral storage — dashboards lost on pod restart</span>
+            <span class="issue-title">User-created dashboards live only in Grafana's unified storage</span>
             <span class="badge badge-amber">MEDIUM</span>
           </div>
-          <p class="issue-body"><code>persistence.enabled: false</code> in the Helm values. Every Grafana pod restart (e.g. Helm upgrade, node eviction) wipes user-created dashboards. Provisioned dashboards (token-usage, antalya-quickstart) return on startup from ConfigMaps, but users lose any personal dashboard data. Acceptable for demo; production requires a PVC or external dashboard storage.</p>
+          <p class="issue-body"><code>persistence.enabled: true</code> (PVC <code>grafana</code>, 1Gi) so user dashboards survive pod restarts. However the <code>claude-usage-reporting</code> dashboard was created interactively and lives <strong>only</strong> in Grafana's unified storage (sqlite <code>resource</code> table on the PVC) — not in any ConfigMap. A cluster rebuild or PVC deletion wipes it. Provisioned dashboards (<code>token-usage</code>, <code>antalya-quickstart</code>) come back on startup from the <code>grafana-dashboards-default</code> ConfigMap. To preserve interactively-built dashboards across rebuilds, dump them via the admin API and check them into <code>deploy/grafana/</code>.</p>
         </div>
       </li>
 
@@ -855,10 +888,43 @@
         <div class="issue-num">7</div>
         <div class="issue-content">
           <div class="issue-header">
-            <span class="issue-title">vertamedia plugin is frontend-only and unsigned</span>
+            <span class="issue-title">vertamedia plugin: JS frontend bypasses its own Go backend</span>
             <span class="badge badge-low" style="background:#f1f5f9;color:#475569;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">LOW</span>
           </div>
-          <p class="issue-body">The vertamedia-clickhouse-datasource plugin must be loaded via <code>GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=vertamedia-clickhouse-datasource</code>. This Grafana configuration flag has broader security implications — it relaxes the plugin signature check globally. The official Grafana ClickHouse plugin does not solve the per-user identity problem (see Problems Solved #1), so there is currently no signed alternative that provides the same capability.</p>
+          <p class="issue-body">Even though <code>plugin.json</code> declares <code>"backend": true</code>, the plugin's JavaScript overrides <code>query()</code> at <code>src/datasource/datasource.ts:519</code> and routes every panel query through Grafana's data-proxy (<code>/api/datasources/proxy/uid/&lt;uid&gt;</code>) instead of the Go <code>QueryData</code> handler. The Go backend is only invoked for <em>resource</em> calls (variable population, health). Patching the Go binary cannot affect dashboard panels — anything attempted there has to survive Grafana's proxy auth middleware. This is why the proxy-side <code>oauthPassThru</code> path has to be sound for dashboards to render at all.</p>
+        </div>
+      </li>
+
+      <li class="issue-item">
+        <div class="issue-num">8</div>
+        <div class="issue-content">
+          <div class="issue-header">
+            <span class="issue-title">Plugin must be loaded via <code>GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS</code></span>
+            <span class="badge badge-low" style="background:#f1f5f9;color:#475569;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">LOW</span>
+          </div>
+          <p class="issue-body">vertamedia-clickhouse-datasource is community-signed; the env flag relaxes signature checking. The official Grafana ClickHouse plugin doesn't propagate per-user identity (see Problems Solved #1), so there's no signed alternative. If a binary is ever hot-patched in-pod for diagnosis, Grafana re-downloads the signed v3.4.11 from <code>GF_INSTALL_PLUGINS</code> on next restart unless <code>MANIFEST.txt</code> is deleted first (signature switches from "modified" to "unsigned-allowed").</p>
+        </div>
+      </li>
+
+      <li class="issue-item">
+        <div class="issue-num">9</div>
+        <div class="issue-content">
+          <div class="issue-header">
+            <span class="issue-title">Dashboard JSON <code>target.format</code> must be lowercase</span>
+            <span class="badge badge-low" style="background:#f1f5f9;color:#475569;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">LOW</span>
+          </div>
+          <p class="issue-body">vertamedia's response dispatcher compares <code>target.format</code> against the literals <code>'table'</code> / <code>'time_series'</code> with <code>===</code>. Dashboard JSON exported from other tools or hand-written using legacy Grafana constants stores <code>"TABLE"</code> / <code>"TIME_SERIES"</code> (uppercase); the comparison silently fails, all targets fall through to the timeseries branch, and stat panels show "No data" while every other panel type may render correctly. Any new dashboard imported into this Grafana needs to be lowercase-normalised — the Grafana UI does it for fresh edits, not retroactively. Worth wiring a lint/precommit hook if dashboards are versioned in Git.</p>
+        </div>
+      </li>
+
+      <li class="issue-item">
+        <div class="issue-num">10</div>
+        <div class="issue-content">
+          <div class="issue-header">
+            <span class="issue-title">CH 26.1+ rejects <code>sum(col) AS col</code> aliasing</span>
+            <span class="badge badge-low" style="background:#f1f5f9;color:#475569;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">LOW</span>
+          </div>
+          <p class="issue-body">CH 26.1+ resolves an alias inside later aggregate arguments in the same SELECT, so <code>sum(input_tokens) AS input_tokens, sum(input_tokens + output_tokens) ...</code> is read as <code>sum(sum(input_tokens) + ...)</code> and throws <em>"Code 184: ILLEGAL_AGGREGATION"</em>. Caught the <code>Per-user reporting table</code> panel on <code>claude-usage-reporting</code>; the table panel returns 500 even when the rest of the dashboard renders fine. Fix is mechanical (rename aliases to distinct identifiers, e.g. <code>AS inputs</code>) but not yet applied to this dashboard — left as a follow-up.</p>
         </div>
       </li>
 
@@ -1083,8 +1149,8 @@
           <td><strong>Grafana</strong></td>
           <td>12.4.3</td>
           <td><code>grafana-oauth.demo.altinity.cloud</code></td>
-          <td><code>auth.generic_oauth</code> (browser) + <code>auth.jwt</code> (mcp-grafana)</td>
-          <td><code>persistence.enabled: false</code>; provisioned dashboards in ConfigMaps</td>
+          <td><code>auth.generic_oauth</code> (browser) + <code>auth.jwt</code> (mcp-grafana) + <code>improvedExternalSessionHandling</code> feature flag</td>
+          <td>PVC (1Gi); provisioned <code>token-usage</code> + <code>antalya-quickstart</code> in CM; <code>claude-usage-reporting</code> in unified storage</td>
         </tr>
         <tr>
           <td><strong>mcp-grafana</strong></td>
