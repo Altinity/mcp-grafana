@@ -704,18 +704,6 @@
       </div>
     </div>
 
-    <div class="problem-card">
-      <div class="problem-card-header">
-        <div class="problem-icon solved">🔤</div>
-        <div class="problem-title">Stat panels showed "No data" even though queries succeeded</div>
-      </div>
-      <p class="problem-desc">The <code>claude-usage-reporting</code> dashboard's Executive Summary KPI panels (<code>stat</code> type, <code>format: "TABLE"</code>) returned valid single-row results from CH but rendered empty. <em>Inspect → Data</em> showed <code>rows: 1</code> in the response, but the panel reduce-op (<code>lastNotNull</code>) found nothing. Root cause: the dashboard JSON used uppercase <code>"TABLE"</code> / <code>"TIME_SERIES"</code> (legacy Grafana constants); the vertamedia plugin's response dispatcher in <code>src/datasource/datasource.ts:404</code> does <code>target.format === 'table'</code> <strong>case-sensitively</strong>. Every stat target fell through to the timeseries branch, which expects a timestamp column, producing empty frames.</p>
-      <div class="solution-box">
-        <div class="solution-label">Solution</div>
-        Use the <strong><code>bentoclick-dashboard</code> skill</strong> to create and save dashboards — it always emits lowercase <code>target.format</code> values (<code>"table"</code>, <code>"time_series"</code>), matching the vertamedia dispatcher literally. The one-time JSON patch via Grafana's admin API was a remediation on the pre-existing <code>claude-usage-reporting</code> dashboard; for all new dashboards the skill is the correct path. Hand-written JSON and exports from other tools should not be imported directly without normalization.
-      </div>
-    </div>
-
   </div>
 </section>
 
