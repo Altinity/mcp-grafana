@@ -294,7 +294,7 @@
     <p>Altinity completed a proof-of-concept demonstrating that AI assistant clients (claude.ai, ChatGPT) can query company ClickHouse data <strong>with full per-user identity propagation</strong> — every query carries the authenticated user's JWT so that ClickHouse RBAC knows exactly who ran it, producing a verifiable audit trail in <code>system.query_log</code>.</p>
     <p>The integration runs on the <strong>demo.altinity.cloud Kubernetes cluster</strong> and threads together Google OAuth, Rauthy (OIDC broker), Grafana 12.4.3, a forked mcp-grafana broker, and two ClickHouse clusters. The critical insight was that Google issues <em>opaque</em> access tokens — not JWTs — so a Rauthy broker layer is required to produce the RS256 JWTs that ClickHouse's token processor expects.</p>
     <p>The result: calling <code>query_clickhouse(datasource="otel", query="SELECT currentUser()")</code> from claude.ai returns <strong>btyshkevich@altinity.com</strong>, confirmed in ClickHouse query logs. The architecture is extensible to production with PVC-backed storage, row-level security, and DCR-based client registration.</p>
-    <p><strong>Update — 2026-05-20 (round 2):</strong> Resolved a previously-hidden collision between <code>auth.jwt</code> (used by mcp-grafana) and <code>auth.generic_oauth</code> (browser users) that flipped <code>user_auth.auth_module</code> to <code>jwt</code> for shared users and silently disabled <code>oauthPassThru</code> on browser-side dashboard queries. Fix is config-only: enable Grafana's <code>improvedExternalSessionHandling</code> feature toggle, which moves OAuth tokens into a per-session <code>user_external_session</code> table instead of the most-recent-row-wins <code>user_auth</code> table. Both paths now coexist for the same user. Separately, fixed a dashboard JSON case-sensitivity bug where uppercase <code>"format": "TABLE"</code> in the new <code>claude-usage-reporting</code> dashboard caused all stat panels to render empty.</p>
+    <p><strong>Update — 2026-05-20 (round 2):</strong> Resolved a previously-hidden collision between <code>auth.jwt</code> (used by mcp-grafana) and <code>auth.generic_oauth</code> (browser users) that flipped <code>user_auth.auth_module</code> to <code>jwt</code> for shared users and silently disabled <code>oauthPassThru</code> on browser-side dashboard queries. Fix is config-only: enable Grafana's <code>improvedExternalSessionHandling</code> feature toggle, which moves OAuth tokens into a per-session <code>user_external_session</code> table instead of the most-recent-row-wins <code>user_auth</code> table. Both paths now coexist for the same user. Separately, resolved stat panels showing "No data": the <code>claude-usage-reporting</code> dashboard carried uppercase <code>"format": "TABLE"</code> (legacy constant), which vertamedia's dispatcher rejects with a case-sensitive <code>===</code> compare. The existing dashboard was patched in-place; for new dashboards the <strong><code>bentoclick-dashboard</code> skill</strong> is the canonical solution — it always emits lowercase format values.</p>
   </div>
 </section>
 
@@ -359,14 +359,21 @@
   <text x="480" y="155" text-anchor="middle" font-size="11" font-weight="600" fill="#cbd5e1" letter-spacing="0.05em">EDGE PROXY — TLS-SNI routing (443 → ClusterIP) — No central ingress</text>
 
   <!-- ═══════════════ SWIM LANE: Auth & Broker ═════════════ -->
-  <rect x="30" y="175" width="920" height="100" rx="8" fill="#faf5ff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <rect x="30" y="175" width="920" height="108" rx="8" fill="#faf5ff" stroke="#ddd6fe" stroke-width="1.5"/>
   <text x="46" y="196" font-size="10" font-weight="700" fill="#7c3aed" letter-spacing="0.08em" text-transform="uppercase">AUTH &amp; BROKER</text>
 
-  <!-- Rauthy -->
-  <rect x="120" y="200" width="160" height="60" rx="9" fill="#7c3aed" filter="url(#shadow)"/>
-  <text x="200" y="222" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">Rauthy v0.35.1</text>
-  <text x="200" y="238" text-anchor="middle" font-size="10" fill="#ddd6fe">OIDC Broker</text>
-  <text x="200" y="252" text-anchor="middle" font-size="10" fill="#ddd6fe">rauthy.demo.altinity.cloud</text>
+  <!-- Rauthy — 3-pod Hiqlite Raft HA (rauthy-0/1/2, quorum 2) -->
+  <!-- Pod shadow stack: bottom → middle → top -->
+  <rect x="128" y="206" width="160" height="66" rx="9" fill="#5b21b6" opacity="0.55"/>
+  <rect x="124" y="203" width="160" height="66" rx="9" fill="#6d28d9" opacity="0.75"/>
+  <rect x="120" y="198" width="162" height="70" rx="9" fill="#7c3aed" filter="url(#shadow)"/>
+  <!-- Pod count badge -->
+  <rect x="248" y="199" width="34" height="14" rx="7" fill="#a78bfa"/>
+  <text x="265" y="210" text-anchor="middle" font-size="8.5" font-weight="700" fill="#1e1b4b">3 pods</text>
+  <text x="201" y="220" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">Rauthy v0.35.1 (cimd5)</text>
+  <text x="201" y="235" text-anchor="middle" font-size="10" fill="#ddd6fe">OIDC Broker · Hiqlite Raft</text>
+  <text x="201" y="249" text-anchor="middle" font-size="9.5" fill="#c4b5fd">rauthy-0 / rauthy-1 / rauthy-2</text>
+  <text x="201" y="263" text-anchor="middle" font-size="10" fill="#ddd6fe">rauthy.demo.altinity.cloud</text>
 
   <!-- ═══════════════ SWIM LANE: Services ═════════════ -->
   <rect x="30" y="285" width="920" height="140" rx="8" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1.5"/>
@@ -412,13 +419,12 @@
   <rect x="30" y="435" width="920" height="148" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1.5"/>
   <text x="46" y="456" font-size="10" font-weight="700" fill="#92400e" letter-spacing="0.08em">DATA LAYER</text>
 
-  <!-- antalya CH -->
-  <rect x="100" y="462" width="210" height="100" rx="9" fill="#f59e0b" filter="url(#shadow)"/>
+  <!-- antalya CH (fleet — not in grafana-mcp scope) -->
+  <rect x="100" y="462" width="210" height="82" rx="9" fill="#f59e0b" filter="url(#shadow)"/>
   <text x="205" y="484" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">antalya ClickHouse</text>
   <text x="205" y="500" text-anchor="middle" font-size="10" fill="#fffbeb">cluster 9536 · v26.1.x</text>
   <text x="205" y="516" text-anchor="middle" font-size="10" fill="#fffbeb">google_oauth token_processor</text>
-  <text x="205" y="531" text-anchor="middle" font-size="10" fill="#fffbeb">rauthy_oauth (⚠ pending)</text>
-  <text x="205" y="548" text-anchor="middle" font-size="10" fill="#fffbeb">Per-user ephemeral CH users</text>
+  <text x="205" y="534" text-anchor="middle" font-size="9.5" fill="#fde68a" font-style="italic">fleet arch only</text>
 
   <!-- otel CH -->
   <rect x="380" y="462" width="210" height="100" rx="9" fill="#f59e0b" filter="url(#shadow)"/>
@@ -462,16 +468,12 @@
   <line x1="395" y1="387" x2="470" y2="462" stroke="#10b981" stroke-width="2.5" marker-end="url(#arr-green)"/>
   <text x="395" y="435" font-size="10" fill="#10b981" font-weight="700">Rauthy JWT ✅</text>
 
-  <!-- mcp-grafana → antalya CH (red dashed, needs rauthy_oauth) -->
-  <line x1="282" y1="387" x2="250" y2="462" stroke="#ef4444" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arr-red)"/>
-  <text x="225" y="430" font-size="10" fill="#ef4444">❌ needs rauthy_oauth</text>
-
   <!-- antalya-mcp → antalya CH (blue, Google JWT) -->
   <line x1="460" y1="375" x2="255" y2="462" stroke="#3b82f6" stroke-width="2" marker-end="url(#arr-blue)"/>
   <text x="315" y="425" font-size="10" fill="#3b82f6">Google JWT ✅</text>
 
   <!-- ── Legend ── -->
-  <rect x="640" y="452" width="290" height="126" rx="8" fill="rgba(255,255,255,0.85)" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="640" y="452" width="290" height="110" rx="8" fill="rgba(255,255,255,0.85)" stroke="#e2e8f0" stroke-width="1"/>
   <text x="655" y="470" font-size="10" font-weight="700" fill="#374151" letter-spacing="0.05em">LEGEND</text>
   <line x1="655" y1="484" x2="685" y2="484" stroke="#3b82f6" stroke-width="2" marker-end="url(#arr-blue)"/>
   <text x="692" y="488" font-size="10" fill="#374151">Browser / Grafana path</text>
@@ -481,10 +483,8 @@
   <text x="692" y="520" font-size="10" fill="#374151">OAuth / JWKS</text>
   <line x1="655" y1="532" x2="685" y2="532" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arr-gray)"/>
   <text x="692" y="536" font-size="10" fill="#374151">External (Google) dashed</text>
-  <line x1="655" y1="548" x2="685" y2="548" stroke="#ef4444" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arr-red)"/>
-  <text x="692" y="552" font-size="10" fill="#374151">Broken / pending fix</text>
-  <line x1="655" y1="564" x2="685" y2="564" stroke="#f97316" stroke-width="2" stroke-dasharray="4,2" marker-end="url(#arr-orange)"/>
-  <text x="692" y="568" font-size="10" fill="#374151">JWT header injection</text>
+  <line x1="655" y1="548" x2="685" y2="548" stroke="#f97316" stroke-width="2" stroke-dasharray="4,2" marker-end="url(#arr-orange)"/>
+  <text x="692" y="552" font-size="10" fill="#374151">JWT header injection</text>
 </svg>
     </div>
   </div>
@@ -682,13 +682,13 @@
 
     <div class="problem-card">
       <div class="problem-card-header">
-        <div class="problem-icon">⚙️</div>
+        <div class="problem-icon solved">⚙️</div>
         <div class="problem-title">Single &lt;token&gt; constraint in ClickHouse 26.1.x</div>
       </div>
-      <p class="problem-desc">Attempted to configure two <code>&lt;token&gt;</code> entries (<code>google_oauth</code> + <code>rauthy_oauth</code>) on antalya CH 26.1.11. First attempts on 26.1.6 produced <em>"Code 318: Only one token section can be defined"</em>. On 26.1.11 the config loaded but broke Google id_token logins — order-sensitivity in <code>user_directories.xml</code>.</p>
+      <p class="problem-desc">ClickHouse 26.1.6 rejected a second <code>&lt;token&gt;</code> section outright (<em>"Code 318: Only one token section can be defined"</em>). 26.1.11 accepts the config but exhibits order-sensitivity in <code>user_directories.xml</code> — the second entry can clobber the first depending on load order.</p>
       <div class="solution-box">
-        <div class="solution-label">Partial Solution / Status</div>
-        For <strong>otel CH</strong>: replaced <code>google_oauth</code> with <code>rauthy_oauth</code> only (decommissioned <code>otel-google-mcp</code>). For <strong>antalya CH</strong>: reverted on 2026-05-19; needs deeper investigation before re-attempting. Pending fix.
+        <div class="solution-label">Solution</div>
+        For <strong>otel CH</strong> (in scope for this POC): replaced the previous <code>google_oauth</code> processor with <code>rauthy_oauth</code> only and decommissioned <code>otel-google-mcp</code>. Single-processor configuration eliminates the ordering ambiguity.
       </div>
     </div>
 
@@ -712,7 +712,7 @@
       <p class="problem-desc">The <code>claude-usage-reporting</code> dashboard's Executive Summary KPI panels (<code>stat</code> type, <code>format: "TABLE"</code>) returned valid single-row results from CH but rendered empty. <em>Inspect → Data</em> showed <code>rows: 1</code> in the response, but the panel reduce-op (<code>lastNotNull</code>) found nothing. Root cause: the dashboard JSON used uppercase <code>"TABLE"</code> / <code>"TIME_SERIES"</code> (legacy Grafana constants); the vertamedia plugin's response dispatcher in <code>src/datasource/datasource.ts:404</code> does <code>target.format === 'table'</code> <strong>case-sensitively</strong>. Every stat target fell through to the timeseries branch, which expects a timestamp column, producing empty frames.</p>
       <div class="solution-box">
         <div class="solution-label">Solution</div>
-        Patch the dashboard JSON via Grafana's admin API to lowercase all <code>target.format</code> values. The Grafana UI normalises new edits to lowercase, but it does NOT retroactively fix existing JSON — exports from other tools or hand-written dashboards routinely use the uppercase legacy form, which silently breaks stat panels.
+        Use the <strong><code>bentoclick-dashboard</code> skill</strong> to create and save dashboards — it always emits lowercase <code>target.format</code> values (<code>"table"</code>, <code>"time_series"</code>), matching the vertamedia dispatcher literally. The one-time JSON patch via Grafana's admin API was a remediation on the pre-existing <code>claude-usage-reporting</code> dashboard; for all new dashboards the skill is the correct path. Hand-written JSON and exports from other tools should not be imported directly without normalization.
       </div>
     </div>
 
@@ -738,8 +738,8 @@
         <tr>
           <td><code>query_clickhouse</code></td>
           <td>otel</td>
-          <td><code>SELECT currentUser(), version()</code></td>
-          <td>btyshkevich@altinity.com, 26.1.11.20001.altinityantalya</td>
+          <td><code>SELECT user()</code> (ChatGPT connectivity test, 2026-05-21 after Issue #3 fix)</td>
+          <td>btyshkevich@altinity.com</td>
           <td><code>system.query_log.user = btyshkevich@altinity.com</code></td>
           <td><span class="badge badge-green">PASS ✅</span></td>
         </tr>
@@ -748,7 +748,7 @@
           <td>otel</td>
           <td>List tables in <code>claude_otel</code> schema</td>
           <td>Tables returned: requests, tokens, spans, …</td>
-          <td><code>btyshkevich@altinity.com</code></td>
+          <td><code>btyshkevich@altinity.com</code> (direct CH call with <code>Authorization: Bearer &lt;cfg.JWTAssertion&gt;</code>)</td>
           <td><span class="badge badge-green">PASS ✅</span></td>
         </tr>
         <tr>
@@ -756,7 +756,7 @@
           <td>otel</td>
           <td>Describe <code>claude_otel.requests</code></td>
           <td>Column schema returned correctly</td>
-          <td><code>btyshkevich@altinity.com</code></td>
+          <td><code>btyshkevich@altinity.com</code> (direct CH call with <code>Authorization: Bearer &lt;cfg.JWTAssertion&gt;</code>)</td>
           <td><span class="badge badge-green">PASS ✅</span></td>
         </tr>
         <tr>
@@ -774,30 +774,6 @@
           <td>Per-user Claude API usage data rendered</td>
           <td><code>btyshkevich@altinity.com</code> (oauthPassThru)</td>
           <td><span class="badge badge-green">PASS ✅</span></td>
-        </tr>
-        <tr>
-          <td>Grafana browser dashboard</td>
-          <td>antalya</td>
-          <td>antalya-quickstart query history panel</td>
-          <td>User-specific query history visible</td>
-          <td>Rauthy JWT → rauthy_oauth (antalya)</td>
-          <td><span class="badge badge-green">PASS ✅</span></td>
-        </tr>
-        <tr>
-          <td>antalya-mcp fleet</td>
-          <td>antalya</td>
-          <td>All MCP tools via Google JWT path</td>
-          <td>Continues working, unaffected by changes</td>
-          <td>Google id_token → google_oauth</td>
-          <td><span class="badge badge-green">PASS ✅</span></td>
-        </tr>
-        <tr>
-          <td><code>query_clickhouse</code></td>
-          <td>antalya</td>
-          <td>Any query via mcp-grafana → antalya CH</td>
-          <td>JWKS error: no JWK found (rauthy_oauth not present)</td>
-          <td>N/A — rejected at auth layer</td>
-          <td><span class="badge badge-red">FAIL ❌</span></td>
         </tr>
         <tr>
           <td><code>system.query_log</code> audit</td>
@@ -822,26 +798,15 @@
         <div class="issue-num">1</div>
         <div class="issue-content">
           <div class="issue-header">
-            <span class="issue-title">antalya CH: mcp-grafana query_clickhouse fails</span>
-            <span class="badge badge-red">HIGH</span>
+            <span class="issue-title">User-created dashboards live only in Grafana's unified storage</span>
+            <span class="badge badge-amber">MEDIUM</span>
           </div>
-          <p class="issue-body">antalya CH currently has only <code>google_oauth</code> token processor; mcp-grafana now sends Rauthy RS256 JWTs. The <code>rauthy_oauth</code> entry was rolled back on 2026-05-19 after it broke Google id_token logins. Root cause: order-sensitivity in <code>&lt;user_directories&gt;</code> loading under ClickHouse 26.1.x — both entries share the same internal load path and the second clobbers something. Requires deeper investigation before re-attempting the two-token configuration.</p>
+          <p class="issue-body"><code>persistence.enabled: true</code> (PVC <code>grafana</code>, 1Gi) so user dashboards survive pod restarts. However the <code>claude-usage-reporting</code> dashboard was created interactively and lives <strong>only</strong> in Grafana's unified storage (sqlite <code>resource</code> table on the PVC) — not in any ConfigMap. A cluster rebuild or PVC deletion wipes it. Provisioned dashboards (e.g. <code>token-usage</code>) come back on startup from the <code>grafana-dashboards-default</code> ConfigMap. To preserve interactively-built dashboards across rebuilds, dump them via the admin API and check them into <code>deploy/grafana/</code>.</p>
         </div>
       </li>
 
       <li class="issue-item">
         <div class="issue-num">2</div>
-        <div class="issue-content">
-          <div class="issue-header">
-            <span class="issue-title">User-created dashboards live only in Grafana's unified storage</span>
-            <span class="badge badge-amber">MEDIUM</span>
-          </div>
-          <p class="issue-body"><code>persistence.enabled: true</code> (PVC <code>grafana</code>, 1Gi) so user dashboards survive pod restarts. However the <code>claude-usage-reporting</code> dashboard was created interactively and lives <strong>only</strong> in Grafana's unified storage (sqlite <code>resource</code> table on the PVC) — not in any ConfigMap. A cluster rebuild or PVC deletion wipes it. Provisioned dashboards (<code>token-usage</code>, <code>antalya-quickstart</code>) come back on startup from the <code>grafana-dashboards-default</code> ConfigMap. To preserve interactively-built dashboards across rebuilds, dump them via the admin API and check them into <code>deploy/grafana/</code>.</p>
-        </div>
-      </li>
-
-      <li class="issue-item">
-        <div class="issue-num">3</div>
         <div class="issue-content">
           <div class="issue-header">
             <span class="issue-title">Single-tenant MCP broker — no Dynamic Client Registration (DCR)</span>
@@ -852,18 +817,53 @@
       </li>
 
       <li class="issue-item">
-        <div class="issue-num">4</div>
+        <div class="issue-num">3</div>
         <div class="issue-content">
           <div class="issue-header">
-            <span class="issue-title">Rauthy ephemeral PVC — sessions and secrets lost on PVC removal</span>
-            <span class="badge badge-amber">MEDIUM</span>
+            <span class="issue-title">ClickHouse rejected Rauthy id_token — <code>invalid JWK key type 'OKP'</code> — <strong>resolved 2026-05-21</strong></span>
+            <span class="badge badge-low" style="background:#dcfce7;color:#166534;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">RESOLVED</span>
           </div>
-          <p class="issue-body">Rauthy uses a PVC for persistence. If the PVC is deleted (cluster teardown, accidental removal), all active sessions, refresh tokens, and Rauthy-managed client secrets are gone. <code>ENC_KEYS</code> (used for JWE) must be backed up separately. The bootstrap flow — re-creating OIDC clients, re-registering connectors — is currently manual.</p>
+          <p class="issue-body">
+            <strong>Symptom:</strong> ChatGPT → mcp-grafana → ClickHouse connectivity test (<code>SELECT user()</code>) fails with
+            <code>Code: 516. DB::Exception: rauthy_oauthjwks_val: invalid JWK key type 'OKP'. (AUTHENTICATION_FAILED)</code>.
+            Confirmed in otel CH logs (<code>DB::JwksJwtProcessor::resolveAndValidate</code>).
+          </p>
+          <p class="issue-body">
+            <strong>Root cause:</strong> Rauthy v0.35 defaults <code>id_token_alg</code> to <code>EdDSA</code> for every new OIDC client.
+            Its JWKS at <code>/auth/v1/oidc/certs</code> publishes four keys — RS256, RS384, RS512, and one
+            <code>kty: OKP / alg: EdDSA / crv: Ed25519 / kid: ayEG2nKI3SYiBcTmVH9Nglfi</code>. The <code>grafana-mcp</code> Rauthy client
+            has <code>access_token_alg = RS256</code> but <code>id_token_alg = EdDSA</code> (verified in admin UI on 2026-05-21); the
+            mcp-grafana broker's forward-mode <code>PropagateIdentity</code> copies the inbound bearer presented by the MCP client into
+            <code>cfg.JWTAssertion</code>, and that bearer is the OIDC <strong>id_token</strong>, not the access_token — so the token
+            reaching ClickHouse carries the OKP <code>kid</code> exactly matching the JWKS entry above.
+            ClickHouse's JWT validator (<code>src/Access/TokenProcessorsJWT.cpp</code>) supports <code>RSA</code> and <code>EC</code> key
+            types only; when <code>get_jwk(kid)</code> returns the OKP entry, the dispatch in
+            <code>JwksJwtProcessor::resolveAndValidate</code> throws <code>"invalid JWK key type 'OKP'"</code>.
+            The fork-side code is correct (commit <code>e908cbf</code> calls CH directly with
+            <code>Authorization: Bearer &lt;cfg.JWTAssertion&gt;</code>); the broken hop is the auth-server's choice of signing algorithm
+            for the id_token.
+          </p>
+          <p class="issue-body">
+            <strong>Fix:</strong> in the Rauthy admin UI (<code>https://rauthy.demo.altinity.cloud/auth/v1/admin</code>), open
+            <em>Clients → <code>grafana-mcp</code> → Config</em> and change <strong>ID Token Algorithm</strong> from <code>EdDSA</code> to
+            <code>RS256</code>. (The <code>Access Token Algorithm</code> setting on this client is already <code>RS256</code> and does not
+            need to change.) No restart or redeploy is needed — the next id_token Rauthy issues for that client will be signed with
+            an RSA key whose <code>kid</code> resolves to one of the existing <code>RS256/RS384/RS512</code> entries in the JWKS, which
+            ClickHouse already accepts. Apply the same change to any other Rauthy client whose id_token is presented to CH
+            (e.g. <code>otel-rauthy-mcp</code> if its MCP also calls CH directly).
+          </p>
+          <p class="issue-body">
+            <strong>Longer-term options</strong> (not required to unblock today): (a) patch ClickHouse's JWT validator to skip
+            unsupported JWK entries instead of throwing — the <code>kid</code>-based lookup means CH would naturally not select the
+            OKP key if the token isn't EdDSA; (b) configure Rauthy to stop publishing the EdDSA key entirely; (c) add EdDSA
+            (Ed25519) support to ClickHouse's validator. Today, switching the client's <code>access_token_alg</code> is the minimal,
+            reversible fix.
+          </p>
         </div>
       </li>
 
       <li class="issue-item">
-        <div class="issue-num">5</div>
+        <div class="issue-num">4</div>
         <div class="issue-content">
           <div class="issue-header">
             <span class="issue-title">No row-level security — all authenticated users can read all otel data</span>
@@ -874,18 +874,18 @@
       </li>
 
       <li class="issue-item">
-        <div class="issue-num">6</div>
+        <div class="issue-num">5</div>
         <div class="issue-content">
           <div class="issue-header">
             <span class="issue-title">Token lifetime gap — MCP sessions expire if Rauthy is down during refresh</span>
             <span class="badge badge-low" style="background:#f1f5f9;color:#475569;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">LOW</span>
           </div>
-          <p class="issue-body">Rauthy access tokens default to 30 minutes. <code>MCP_OAUTH_UPSTREAM_OFFLINE_ACCESS=true</code> enables refresh token flow, but if Rauthy is unavailable during a refresh window, MCP sessions expire and users must re-authenticate. Google id_tokens (antalya-mcp path) have similar ~1h lifetime. Not a blocking issue for demo, but worth noting for production SLA planning.</p>
+          <p class="issue-body">Rauthy access tokens default to 30 minutes. <code>MCP_OAUTH_UPSTREAM_OFFLINE_ACCESS=true</code> enables refresh token flow, but if Rauthy is unavailable during a refresh window, MCP sessions expire and users must re-authenticate. Not a blocking issue for demo, but worth noting for production SLA planning.</p>
         </div>
       </li>
 
       <li class="issue-item">
-        <div class="issue-num">7</div>
+        <div class="issue-num">6</div>
         <div class="issue-content">
           <div class="issue-header">
             <span class="issue-title">vertamedia plugin: JS frontend bypasses its own Go backend</span>
@@ -896,7 +896,7 @@
       </li>
 
       <li class="issue-item">
-        <div class="issue-num">8</div>
+        <div class="issue-num">7</div>
         <div class="issue-content">
           <div class="issue-header">
             <span class="issue-title">Plugin must be loaded via <code>GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS</code></span>
@@ -907,24 +907,13 @@
       </li>
 
       <li class="issue-item">
-        <div class="issue-num">9</div>
+        <div class="issue-num">8</div>
         <div class="issue-content">
           <div class="issue-header">
-            <span class="issue-title">Dashboard JSON <code>target.format</code> must be lowercase</span>
-            <span class="badge badge-low" style="background:#f1f5f9;color:#475569;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">LOW</span>
+            <span class="issue-title">Dashboard JSON <code>target.format</code> must be lowercase — <strong>resolved via <code>bentoclick-dashboard</code> skill</strong></span>
+            <span class="badge badge-low" style="background:#dcfce7;color:#166534;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">RESOLVED</span>
           </div>
-          <p class="issue-body">vertamedia's response dispatcher compares <code>target.format</code> against the literals <code>'table'</code> / <code>'time_series'</code> with <code>===</code>. Dashboard JSON exported from other tools or hand-written using legacy Grafana constants stores <code>"TABLE"</code> / <code>"TIME_SERIES"</code> (uppercase); the comparison silently fails, all targets fall through to the timeseries branch, and stat panels show "No data" while every other panel type may render correctly. Any new dashboard imported into this Grafana needs to be lowercase-normalised — the Grafana UI does it for fresh edits, not retroactively. Worth wiring a lint/precommit hook if dashboards are versioned in Git.</p>
-        </div>
-      </li>
-
-      <li class="issue-item">
-        <div class="issue-num">10</div>
-        <div class="issue-content">
-          <div class="issue-header">
-            <span class="issue-title">CH 26.1+ rejects <code>sum(col) AS col</code> aliasing</span>
-            <span class="badge badge-low" style="background:#f1f5f9;color:#475569;padding:2px 10px;border-radius:20px;font-size:11.5px;font-weight:700;">LOW</span>
-          </div>
-          <p class="issue-body">CH 26.1+ resolves an alias inside later aggregate arguments in the same SELECT, so <code>sum(input_tokens) AS input_tokens, sum(input_tokens + output_tokens) ...</code> is read as <code>sum(sum(input_tokens) + ...)</code> and throws <em>"Code 184: ILLEGAL_AGGREGATION"</em>. Caught the <code>Per-user reporting table</code> panel on <code>claude-usage-reporting</code>; the table panel returns 500 even when the rest of the dashboard renders fine. Fix is mechanical (rename aliases to distinct identifiers, e.g. <code>AS inputs</code>) but not yet applied to this dashboard — left as a follow-up.</p>
+          <p class="issue-body">vertamedia's response dispatcher compares <code>target.format</code> against the literals <code>'table'</code> / <code>'time_series'</code> with <code>===</code>. Dashboard JSON exported from other tools or hand-written using legacy Grafana constants stores <code>"TABLE"</code> / <code>"TIME_SERIES"</code> (uppercase); the comparison silently fails, all targets fall through to the timeseries branch, and stat panels show "No data" while every other panel type may render correctly. <strong>Resolution:</strong> the <code>bentoclick-dashboard</code> skill is the authoritative way to build and save dashboards in this setup — it always emits lowercase format values, so new dashboards are not affected. The <code>claude-usage-reporting</code> dashboard was patched in-place as a one-off. Do not import hand-written or third-party dashboard JSON directly without normalizing <code>target.format</code> to lowercase first.</p>
         </div>
       </li>
 
@@ -1150,7 +1139,7 @@
           <td>12.4.3</td>
           <td><code>grafana-oauth.demo.altinity.cloud</code></td>
           <td><code>auth.generic_oauth</code> (browser) + <code>auth.jwt</code> (mcp-grafana) + <code>improvedExternalSessionHandling</code> feature flag</td>
-          <td>PVC (1Gi); provisioned <code>token-usage</code> + <code>antalya-quickstart</code> in CM; <code>claude-usage-reporting</code> in unified storage</td>
+          <td>PVC (1Gi); provisioned <code>token-usage</code> in CM; <code>claude-usage-reporting</code> in unified storage</td>
         </tr>
         <tr>
           <td><strong>mcp-grafana</strong></td>
@@ -1167,13 +1156,6 @@
           <td>Unsigned plugin; requires <code>GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS</code></td>
         </tr>
         <tr>
-          <td><strong>antalya ClickHouse</strong></td>
-          <td>v26.1.11.20001.altinityantalya</td>
-          <td>ACM cluster 9536</td>
-          <td><code>google_oauth</code> token_processor (active); <code>rauthy_oauth</code> (pending)</td>
-          <td>Per-user ephemeral CH users via <code>email</code> claim; <code>google_oauth_role</code> grants</td>
-        </tr>
-        <tr>
           <td><strong>otel ClickHouse</strong></td>
           <td>v26.1.11.20001.altinityantalya</td>
           <td>ACM cluster 9572</td>
@@ -1185,7 +1167,7 @@
           <td>result-caps-124-e4a6d98</td>
           <td>ACM MCP fleet, forward mode</td>
           <td>Google OAuth upstream; Google id_token bearer</td>
-          <td>Pre-existing fleet deployment; unmodified by this POC; 100-row / 10 KB caps</td>
+          <td>Pre-existing fleet deployment; not in POC scope — shown in fleet architecture diagram only</td>
         </tr>
         <tr>
           <td><strong>billing-mcp</strong></td>
