@@ -1,0 +1,15 @@
+# Used by scripts/build-mcp-image.sh — assumes the mcp-grafana binary has
+# already been cross-compiled into the build context. Mirrors the altinity-mcp
+# pattern so the same per-arch + manifest workflow applies. Upstream's
+# Dockerfile (multi-stage with in-container `go build`) is unchanged.
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates curl bash
+
+WORKDIR /bin/
+COPY mcp-grafana .
+
+EXPOSE 8000
+
+ENTRYPOINT ["/bin/mcp-grafana"]

@@ -241,6 +241,13 @@ type GrafanaConfig struct {
 	// It is used for on-behalf-of auth in Grafana Cloud.
 	IDToken string
 
+	// JWTAssertion is the raw inbound OAuth bearer (validated by the
+	// mcp-oauth broker middleware) that should be forwarded to Grafana as
+	// the X-JWT-Assertion header. Grafana then validates it independently
+	// via [auth.jwt] and maps it to a user. Empty when OAuth is disabled
+	// or the request arrived without a bearer.
+	JWTAssertion string
+
 	// TLSConfig holds TLS configuration for all Grafana clients.
 	TLSConfig *TLSConfig
 
@@ -540,12 +547,47 @@ func NewAuthRoundTripper(rt http.RoundTripper, accessToken, idToken, apiKey stri
 	}
 }
 
+// JWTAssertionRoundTripper sets the X-JWT-Assertion header from the raw
+// inbound OAuth bearer when one is present on the request context's
+// GrafanaConfig. It is purely additive — it does not touch Authorization
+// or any other auth header, so the existing service-account-token bearer
+// continues to authorise the call and Grafana's [auth.jwt] block can
+// independently validate the assertion to derive the user identity.
+type JWTAssertionRoundTripper struct {
+	assertion  string
+	underlying http.RoundTripper
+}
+
+func (rt *JWTAssertionRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	assertion := rt.assertion
+	if cfg := GrafanaConfigFromContext(req.Context()); cfg.JWTAssertion != "" {
+		assertion = cfg.JWTAssertion
+	}
+	if assertion == "" {
+		return rt.underlying.RoundTrip(req)
+	}
+	clonedReq := req.Clone(req.Context())
+	clonedReq.Header.Set("X-JWT-Assertion", assertion)
+	return rt.underlying.RoundTrip(clonedReq)
+}
+
+func NewJWTAssertionRoundTripper(rt http.RoundTripper, assertion string) *JWTAssertionRoundTripper {
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return &JWTAssertionRoundTripper{
+		assertion:  assertion,
+		underlying: rt,
+	}
+}
+
 // transportOptions controls which middleware layers BuildTransport includes.
 type transportOptions struct {
-	withoutAuth      bool
-	withoutOrgID     bool
-	withoutOtel      bool
-	withoutUserAgent bool
+	withoutAuth         bool
+	withoutOrgID        bool
+	withoutOtel         bool
+	withoutUserAgent    bool
+	withoutJWTAssertion bool
 }
 
 // TransportOption configures optional behaviour of BuildTransport.
@@ -570,6 +612,14 @@ func WithoutOtel() TransportOption {
 // WithoutUserAgent skips the User-Agent header layer.
 func WithoutUserAgent() TransportOption {
 	return func(o *transportOptions) { o.withoutUserAgent = true }
+}
+
+// WithoutJWTAssertion skips the X-JWT-Assertion header layer.
+// Use this for clients that talk to backends that don't honour the
+// assertion (e.g., the incident / on-call HTTP clients that already
+// pass WithoutAuth).
+func WithoutJWTAssertion() TransportOption {
+	return func(o *transportOptions) { o.withoutJWTAssertion = true }
 }
 
 // BuildTransport constructs an http.RoundTripper with the standard middleware
@@ -608,6 +658,13 @@ func BuildTransport(cfg *GrafanaConfig, base http.RoundTripper, opts ...Transpor
 	// Auth (innermost header layer — wins on conflicts with ExtraHeaders)
 	if !options.withoutAuth {
 		transport = NewAuthRoundTripper(transport, cfg.AccessToken, cfg.IDToken, cfg.APIKey, cfg.BasicAuth)
+	}
+
+	// X-JWT-Assertion (additive — does not interfere with Authorization
+	// set by AuthRoundTripper; lets Grafana's [auth.jwt] independently
+	// authenticate the user while the SA token remains the API credential).
+	if !options.withoutJWTAssertion {
+		transport = NewJWTAssertionRoundTripper(transport, cfg.JWTAssertion)
 	}
 
 	// Extra headers (always included so per-request context overrides work)
